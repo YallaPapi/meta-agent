@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -233,37 +236,130 @@ class PerplexityAnalysisEngine(AnalysisEngine):
     def _parse_response(self, content: str) -> AnalysisResult:
         """Parse the LLM response into structured result.
 
+        Uses multiple extraction strategies for robustness.
+
         Args:
             content: Raw response content from the LLM.
 
         Returns:
             Parsed AnalysisResult.
         """
-        # Try to extract JSON from the response
+        json_str = None
+
+        # Strategy 1: Look for ```json ... ``` block
         json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
         if json_match:
-            json_str = json_match.group(1)
-        else:
-            json_str = content
+            json_str = json_match.group(1).strip()
+            logger.debug("Found JSON in code block")
 
-        try:
-            data = json.loads(json_str)
-            return AnalysisResult(
-                summary=data.get("summary", ""),
-                recommendations=data.get("recommendations", []),
-                tasks=data.get("tasks", []),
-                raw_response=content,
-                success=True,
-            )
-        except json.JSONDecodeError:
-            # Fallback: treat the whole response as summary
-            return AnalysisResult(
-                summary=content,
-                recommendations=[],
-                tasks=[],
-                raw_response=content,
-                success=True,
-            )
+        # Strategy 2: Look for raw JSON object (first { to last })
+        if not json_str:
+            brace_match = re.search(r'(\{[\s\S]*\})', content)
+            if brace_match:
+                json_str = brace_match.group(1)
+                logger.debug("Found JSON by brace matching")
+
+        if json_str:
+            try:
+                # Clean up common JSON issues
+                json_str = re.sub(r',\s*}', '}', json_str)  # trailing commas before }
+                json_str = re.sub(r',\s*]', ']', json_str)  # trailing commas before ]
+
+                data = json.loads(json_str)
+                return AnalysisResult(
+                    summary=data.get("summary", ""),
+                    recommendations=data.get("recommendations", []),
+                    tasks=self._normalize_tasks(data.get("tasks", [])),
+                    raw_response=content,
+                    success=True,
+                )
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse failed: {e}")
+
+        # Fallback: Create structured result from raw text
+        logger.debug("Using fallback text parsing")
+        return self._create_fallback_result(content)
+
+    def _normalize_tasks(self, tasks: list) -> list[dict[str, Any]]:
+        """Ensure tasks have required fields.
+
+        Args:
+            tasks: Raw task list from JSON.
+
+        Returns:
+            Normalized task list with all required fields.
+        """
+        normalized = []
+        for task in tasks:
+            if isinstance(task, dict):
+                normalized.append({
+                    'title': task.get('title', 'Untitled task'),
+                    'description': task.get('description', str(task)),
+                    'priority': task.get('priority', 'medium').lower(),
+                    'file': task.get('file', ''),
+                })
+            elif isinstance(task, str):
+                normalized.append({
+                    'title': task[:80] + '...' if len(task) > 80 else task,
+                    'description': task,
+                    'priority': 'medium',
+                    'file': '',
+                })
+        return normalized
+
+    def _create_fallback_result(self, content: str) -> AnalysisResult:
+        """Create a structured result from unstructured text.
+
+        Args:
+            content: Raw response content.
+
+        Returns:
+            AnalysisResult with extracted information.
+        """
+        # Extract bullet points as potential tasks
+        tasks = []
+        bullet_pattern = re.compile(r'^\s*[-*\u2022]\s+(.+)$', re.MULTILINE)
+        for match in bullet_pattern.finditer(content):
+            text = match.group(1).strip()
+            if len(text) > 10:  # Skip very short bullets
+                tasks.append({
+                    'title': text[:80] + '...' if len(text) > 80 else text,
+                    'description': text,
+                    'priority': 'medium',
+                    'file': '',
+                })
+
+        # Also look for numbered items
+        numbered_pattern = re.compile(r'^\s*\d+[.)]\s+(.+)$', re.MULTILINE)
+        for match in numbered_pattern.finditer(content):
+            text = match.group(1).strip()
+            if len(text) > 10:
+                tasks.append({
+                    'title': text[:80] + '...' if len(text) > 80 else text,
+                    'description': text,
+                    'priority': 'medium',
+                    'file': '',
+                })
+
+        # Use first paragraph as summary
+        paragraphs = content.split('\n\n')
+        summary = paragraphs[0][:500] if paragraphs else content[:500]
+
+        # Extract recommendations from sections that mention "recommend"
+        recommendations = []
+        recommend_pattern = re.compile(r'recommend[^\n]*:?\s*([^\n]+)', re.IGNORECASE)
+        for match in recommend_pattern.finditer(content):
+            rec = match.group(1).strip()
+            if rec and len(rec) > 5:
+                recommendations.append(rec)
+
+        return AnalysisResult(
+            summary=summary,
+            recommendations=recommendations[:10],  # Limit recommendations
+            tasks=tasks[:10],  # Limit to 10 tasks
+            raw_response=content,
+            success=True,
+        )
 
 
 def create_analysis_engine(

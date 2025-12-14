@@ -1,0 +1,117 @@
+{
+  "summary": "The meta-agent has a functional skeleton but critical wiring issues prevent it from working as designed. The orchestrator bypassed the PRD's staged pipeline (alignment → architecture → hardening → tests) in favor of an AI-driven triage loop that relies on `meta_triage` to select prompts dynamically. While prompt loading from `config/prompt_library/*.md` works, the `Prompt.render()` method doesn't interpolate Jinja2 variables—it just appends context sections. Most critically, `_implement_with_claude()` is a stub that writes tasks to a file but doesn't invoke Claude Code. The system needs proper stage-based orchestration, robust prompt rendering, and actual implementation execution to fulfill the PRD's goals.",
+
+  "selected_prompt_configs": [
+    {
+      "stage": "alignment",
+      "codebase_digest_prompt_category": "learning_user_story_reconstruction",
+      "question_for_prompt": "Given the meta-agent's PRD (in `docs/prd.md` or `.taskmaster/docs/prd.md`), reconstruct the user stories and acceptance criteria. Then compare against the current implementation to identify which user flows are implemented, partially implemented, or missing entirely. Focus on: CLI invocation → profile loading → staged analysis → plan generation → Claude Code handoff.",
+      "expected_output_use": "The reconstructed user stories become acceptance criteria for the fix tasks. Missing flows get added to the improvement plan as 'must-have' tasks."
+    },
+    {
+      "stage": "architecture",
+      "codebase_digest_prompt_category": "architecture_layer_identification",
+      "question_for_prompt": "Identify the architectural layers in the meta-agent (CLI → Config → Orchestrator → Analysis Engine → Plan Writer → Claude Code Integration). For each layer, document: (1) which module implements it, (2) its responsibilities, (3) its dependencies, and (4) any violations of single responsibility. Specifically flag where `orchestrator.py` is doing too much.",
+      "expected_output_use": "Layer analysis informs refactoring tasks. The orchestrator's monolithic design should be split into separate concerns: StageRunner, TriageEngine, ImplementationExecutor."
+    },
+    {
+      "stage": "architecture",
+      "codebase_digest_prompt_category": "architecture_coupling_cohesion_analysis",
+      "question_for_prompt": "Analyze coupling between meta-agent components. Flag: (1) `orchestrator.py` directly instantiating `RepomixRunner`, `CodebaseDigestRunner`, `AnalysisEngine` instead of using dependency injection properly, (2) `prompts.py` `Prompt.render()` not using Jinja2 Template engine, (3) tight coupling between triage logic and prompt execution in `refine()`. What changes would improve testability and modularity?",
+      "expected_output_use": "Coupling issues become refactoring tasks. The analysis should drive creation of proper interfaces/protocols for AnalysisEngine, CodeRunner, etc."
+    },
+    {
+      "stage": "hardening",
+      "codebase_digest_prompt_category": "quality_error_analysis",
+      "question_for_prompt": "Find errors and inconsistencies in the meta-agent: (1) `Prompt.render()` builds prompts by appending sections but ignores `{{ prd }}`, `{{ code_context }}` Jinja2 placeholders in templates, (2) `_run_triage()` parses JSON naively and may fail on edge cases, (3) `_implement_with_claude()` is a stub returning `True` without doing anything, (4) profiles.yaml defines stages but `refine()` doesn't use them—only triage-selected prompts are run. Document each error with file/line and severity.",
+      "expected_output_use": "Each error becomes a 'critical' or 'high' priority fix task with specific file references."
+    },
+    {
+      "stage": "hardening",
+      "codebase_digest_prompt_category": "evolution_technical_debt_estimation",
+      "question_for_prompt": "Estimate technical debt in the meta-agent. Focus on: (1) TODOs in code (e.g., `# TODO: Integrate with Claude Code CLI when available`), (2) mock-only implementations (`_implement_with_claude` does nothing real), (3) commented-out code or dead code paths, (4) missing error handling for API failures. Assign debt scores (1-10) and remediation effort estimates.",
+      "expected_output_use": "Tech debt items with high scores and low remediation effort become prioritized fix tasks."
+    },
+    {
+      "stage": "tests",
+      "codebase_digest_prompt_category": "testing_unit_test_generation",
+      "question_for_prompt": "Generate unit test cases for the meta-agent's core flows: (1) `PromptLibrary.load()` should load markdown prompts from `config/prompt_library/`, (2) `Prompt.render()` should interpolate Jinja2 variables, (3) `Orchestrator.refine()` should execute stages in profile order when triage is disabled, (4) `PerplexityAnalysisEngine._parse_response()` should extract JSON from various response formats. Provide pytest test function signatures and key assertions.",
+      "expected_output_use": "Generated test cases are added to `tests/` directory. Tests that fail become bug indicators; tests that pass validate fixes."
+    }
+  ],
+
+  "tasks": [
+    {
+      "title": "Fix Prompt.render() to use Jinja2 template interpolation",
+      "description": "The current `Prompt.render()` in `src/metaagent/prompts.py` builds prompts by appending context sections at the end, but the markdown prompt templates in `config/prompt_library/*.md` don't have `{{ prd }}`, `{{ code_context }}` placeholders. The YAML prompts in `config/prompts.yaml` DO have these placeholders but they're never interpolated. Fix by: (1) Using `jinja2.Template(self.template).render(prd=prd, code_context=code_context, ...)` for YAML-based prompts, (2) For markdown prompts, prepend a standard context header before the prompt content. Add a `template_type` field to distinguish.",
+      "priority": "must-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py", "config/prompts.yaml"],
+      "notes": "Acceptance: `Prompt.render(prd='test PRD', code_context='test code')` on a YAML prompt with `{{ prd }}` returns the interpolated string. Test with `test_prompts.py::test_render_with_jinja2`."
+    },
+    {
+      "title": "Implement staged pipeline execution alongside triage",
+      "description": "The PRD specifies a staged approach: alignment → architecture → hardening → tests. But `Orchestrator.refine()` only uses AI triage (`meta_triage`) to pick prompts dynamically, ignoring the `profiles.yaml` stage definitions entirely. Fix by: (1) Adding a `--profile` flag to `refine` CLI that enables staged mode, (2) When a profile is specified, execute prompts in stage order from the profile's `stages` list, (3) Keep triage mode as default/fallback when no profile is specified. This dual-mode approach satisfies both PRD requirements.",
+      "priority": "must-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/orchestrator.py", "src/metaagent/cli.py", "config/profiles.yaml"],
+      "notes": "Acceptance: `metaagent refine --profile automation_agent` runs alignment_with_prd first, then architecture_sanity, then core_flow_hardening, then test_suite_mvp in order, without triage."
+    },
+    {
+      "title": "Implement actual Claude Code execution in _implement_with_claude()",
+      "description": "The `_implement_with_claude()` method in `orchestrator.py` is a stub—it writes tasks to `.meta-agent-tasks.md` and returns `True` without invoking Claude Code. Options to fix: (1) Invoke `claude` CLI via subprocess with the task file as input, (2) Use Claude API directly to generate implementation diffs, (3) If Claude Code CLI isn't available, at minimum write a proper structured prompt file that a human can paste into Claude Code. For v1, implement option (3) properly with clear instructions and structured JSON tasks.",
+      "priority": "must-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/orchestrator.py"],
+      "notes": "Acceptance: After running analysis stages, the output file at `.meta-agent-tasks.md` contains: (1) A Claude Code instruction header, (2) Tasks in priority order with checkboxes, (3) File paths for each task. Manual test: pasting the file into Claude Code produces sensible implementation attempts."
+    },
+    {
+      "title": "Add robust JSON extraction from LLM responses",
+      "description": "The `_run_triage()` and `_parse_response()` methods use naive JSON extraction (`find('{')` / `rfind('}')`). This fails when: (1) The LLM includes multiple JSON blocks, (2) JSON is wrapped in markdown code fences with extra text, (3) The LLM outputs partial JSON. Fix by: (1) Creating a `extract_json_from_response(text: str) -> dict` utility, (2) Handle `'''json` fences properly, (3) Try multiple extraction strategies in order, (4) Provide clear error messages when all fail.",
+      "priority": "must-have",
+      "area": "analysis_engine",
+      "files": ["src/metaagent/analysis.py", "src/metaagent/orchestrator.py"],
+      "notes": "Acceptance: `extract_json_from_response('Here is the analysis:\\n```json\\n{\"summary\": \"test\"}\\n```\\nEnd of response')` returns `{'summary': 'test'}`."
+    },
+    {
+      "title": "Wire profiles.yaml stages to prompt_library prompts correctly",
+      "description": "The `profiles.yaml` references prompts like `quality_error_analysis`, `architecture_layer_identification` which exist in `config/prompt_library/` as markdown files. But the `PromptLibrary._load_profiles()` doesn't validate that referenced stages exist as prompts. And when `get_prompt()` is called, it may not find the prompt if the ID doesn't match exactly. Fix by: (1) Adding profile validation on load that warns about missing prompts, (2) Ensure prompt IDs from markdown files match what profiles reference (filename stem), (3) Add a `list_profile_stages_with_prompts()` method to debug configuration issues.",
+      "priority": "should-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py", "config/profiles.yaml"],
+      "notes": "Acceptance: `metaagent list-profiles --validate` shows each profile with its stages and marks ✓ or ✗ if the corresponding prompt exists."
+    },
+    {
+      "title": "Create integration tests for full refinement pipeline",
+      "description": "The current tests in `tests/` are mostly unit tests for individual components. Add integration tests that: (1) Create a temp repo with a PRD, (2) Run `metaagent refine --mock --profile quick_review`, (3) Assert that the correct prompts were loaded and rendered, (4) Assert that `mvp_improvement_plan.md` was generated with expected sections, (5) Assert that tasks from mock analysis appear in the plan. Use pytest fixtures from `conftest.py`.",
+      "priority": "should-have",
+      "area": "tests",
+      "files": ["tests/test_orchestrator.py", "tests/conftest.py"],
+      "notes": "Acceptance: `pytest tests/test_orchestrator.py::test_full_refinement_pipeline_mock` passes and covers the main flow."
+    },
+    {
+      "title": "Add context budget management for large codebases",
+      "description": "The `RepomixRunner` truncates content at `max_chars`, but there's no intelligent truncation. For large codebases, important files (like the orchestrator) may get cut. Fix by: (1) Prioritizing files by path (src/ > tests/ > config/), (2) Keeping file structure summary even when truncating content, (3) Adding a `--include-only` pattern option to focus on specific directories, (4) Showing token estimate in verbose output so users know if they're over budget.",
+      "priority": "nice-to-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/repomix.py", "src/metaagent/orchestrator.py"],
+      "notes": "Acceptance: Packing a 500k char codebase produces intelligent truncation with a header showing what was included vs. excluded."
+    },
+    {
+      "title": "Add --dry-run flag to preview analysis plan without API calls",
+      "description": "Users want to see what prompts will be run before spending API credits. Add a `--dry-run` flag to the `refine` command that: (1) Loads profile and prompts, (2) Shows which stages/prompts would be executed in order, (3) Estimates token count for the full context, (4) Doesn't call any LLM APIs. This helps debug configuration issues.",
+      "priority": "nice-to-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/cli.py", "src/metaagent/orchestrator.py"],
+      "notes": "Acceptance: `metaagent refine --profile full_review --dry-run` outputs the 13 prompts that would run, total estimated tokens, and exits without API calls."
+    },
+    {
+      "title": "Add run history persistence across sessions",
+      "description": "The `RunHistory` class in `orchestrator.py` only keeps history for the current run. The PRD mentions tracking whether 'Must-fix' tasks are resolved across runs (FR15). Fix by: (1) Persisting history to `.metaagent/history.json`, (2) Loading previous history on startup, (3) Marking tasks as 'addressed' when re-analysis shows improvement, (4) Adding `--from-history` flag to resume from last run.",
+      "priority": "nice-to-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/orchestrator.py"],
+      "notes": "Acceptance: Run 1 generates tasks. Run 2 shows 'Previously identified: 5 tasks, 2 resolved' in output."
+    }
+  ]
+}

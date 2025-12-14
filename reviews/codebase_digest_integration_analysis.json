@@ -1,0 +1,147 @@
+{
+  "summary": "The meta-agent has infrastructure for loading Codebase Digest prompts from config/prompt_library/*.md, but the prompts are not properly integrated: (1) Codebase Digest prompts lack JSON output schema - they have freeform 'Expected Output' sections, (2) Prompt.render() appends context at the END instead of wrapping the prompt with context + JSON contract, (3) The profiles.yaml correctly references Codebase Digest prompt IDs but the prompts won't produce structured JSON that the orchestrator can aggregate into tasks. The fix requires modifying PromptLibrary and Prompt classes to detect Codebase Digest prompts and wrap them with a standardized context header + JSON response schema footer.",
+
+  "findings": [
+    {
+      "area": "prompt_wiring",
+      "description": "The Prompt.render() method in src/metaagent/prompts.py appends context sections (PRD, code, history) AFTER the template text. Codebase Digest prompts expect the codebase context to come BEFORE or alongside the instructions, not after. The current implementation produces: [prompt_template] + [separator] + [PRD] + [code_context] + [history], which doesn't match how analysis prompts should be structured.",
+      "severity": "critical",
+      "files": ["src/metaagent/prompts.py"]
+    },
+    {
+      "area": "prompt_wiring",
+      "description": "Codebase Digest prompts (*.md files in config/prompt_library/) have their own 'Expected Output' sections that describe freeform text outputs, not JSON. The system expects JSON responses with {summary, recommendations, tasks} structure from analysis.py._parse_response(), but these prompts don't instruct the LLM to respond in that format. When these prompts run, the LLM will produce unstructured text that falls through to the fallback parser.",
+      "severity": "critical",
+      "files": ["config/prompt_library/*.md", "src/metaagent/analysis.py"]
+    },
+    {
+      "area": "prompt_wiring",
+      "description": "The Prompt dataclass has no mechanism to distinguish between 'custom prompts with built-in JSON schema' (from prompts.yaml) and 'external Codebase Digest prompts needing JSON schema wrapper' (from prompt_library/). Both are treated identically, but they require different rendering strategies.",
+      "severity": "high",
+      "files": ["src/metaagent/prompts.py"]
+    },
+    {
+      "area": "config",
+      "description": "The profiles.yaml correctly maps profile names to Codebase Digest prompt IDs (e.g., 'architecture_layer_identification', 'quality_error_analysis'), but the stage names in prompts.yaml (alignment_with_prd, architecture_sanity, etc.) are different and never referenced. There's a disconnect between the two prompt sources.",
+      "severity": "medium",
+      "files": ["config/profiles.yaml", "config/prompts.yaml"]
+    },
+    {
+      "area": "orchestrator",
+      "description": "The Orchestrator._run_triage() method in orchestrator.py expects JSON responses with 'done', 'selected_prompts', etc. The meta_triage.md prompt does include JSON schema, but standard Codebase Digest prompts selected by triage do not. The orchestrator doesn't handle this mismatch.",
+      "severity": "high",
+      "files": ["src/metaagent/orchestrator.py"]
+    },
+    {
+      "area": "orchestrator",
+      "description": "The AnalysisResult tasks are expected to have 'title', 'description', 'priority', 'file' fields. The analysis.py parser tries to extract these from JSON, but Codebase Digest prompts don't generate this structure. The plan_writer receives empty or poorly structured task lists.",
+      "severity": "high",
+      "files": ["src/metaagent/analysis.py", "src/metaagent/plan_writer.py"]
+    },
+    {
+      "area": "config",
+      "description": "The _parse_markdown_prompt() method extracts category from filename prefix (e.g., 'quality' from 'quality_error_analysis'), but doesn't preserve any metadata about whether the prompt needs JSON wrapping. All markdown prompts are loaded identically regardless of their expected output format.",
+      "severity": "medium",
+      "files": ["src/metaagent/prompts.py"]
+    }
+  ],
+
+  "tasks": [
+    {
+      "title": "Create JSON response schema wrapper constant",
+      "description": "Add a constant JSON_RESPONSE_SCHEMA in prompts.py that contains the standard response format instructions. This will be appended to Codebase Digest prompts to ensure structured output:\n\n```python\nJSON_RESPONSE_SCHEMA = '''\n\n---\n\n## Required Response Format\n\nYou MUST respond with valid JSON in exactly this structure:\n```json\n{\n  \"summary\": \"2-4 sentence overview of your analysis findings\",\n  \"recommendations\": [\"High-level recommendation 1\", \"High-level recommendation 2\"],\n  \"tasks\": [\n    {\n      \"title\": \"Short task title\",\n      \"description\": \"Detailed description of what needs to be done\",\n      \"priority\": \"critical|high|medium|low\",\n      \"file\": \"path/to/relevant/file.py\"\n    }\n  ]\n}\n```\n\nDo not include any text outside the JSON block.\n'''\n```",
+      "priority": "must-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "This schema must match what AnalysisResult expects and what plan_writer.py can process into tasks."
+    },
+    {
+      "title": "Add 'source' field to Prompt dataclass",
+      "description": "Extend the Prompt dataclass to track where the prompt came from:\n\n```python\n@dataclass\nclass Prompt:\n    id: str\n    goal: str\n    template: str\n    stage: str\n    dependencies: list[str] = field(default_factory=list)\n    when_to_use: Optional[str] = None\n    category: Optional[str] = None\n    source: str = 'yaml'  # NEW: 'yaml' or 'markdown'\n    has_json_schema: bool = True  # NEW: whether template includes JSON schema\n```\n\nSet source='markdown' and has_json_schema=False when loading from prompt_library/*.md files.",
+      "priority": "must-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "This allows render() to conditionally add the JSON schema wrapper."
+    },
+    {
+      "title": "Refactor Prompt.render() to build comprehensive prompts",
+      "description": "Rewrite Prompt.render() to construct prompts in the correct order:\n\n```python\ndef render(\n    self,\n    prd: str = \"\",\n    code_context: str = \"\",\n    history: str = \"\",\n    current_stage: str = \"\",\n) -> str:\n    sections = []\n    \n    # 1. Add context header\n    if prd:\n        sections.append(f\"## Product Requirements Document (PRD)\\n\\n{prd}\")\n    if code_context:\n        sections.append(f\"## Codebase\\n\\n{code_context}\")\n    if history:\n        sections.append(f\"## Previous Analysis\\n\\n{history}\")\n    \n    context_block = \"\\n\\n---\\n\\n\".join(sections) if sections else \"\"\n    \n    # 2. Add the analysis prompt/instructions\n    prompt_block = self.template\n    \n    # 3. Add JSON schema if needed\n    json_schema = \"\" if self.has_json_schema else JSON_RESPONSE_SCHEMA\n    \n    # Build final prompt: context -> instructions -> schema\n    parts = [p for p in [context_block, prompt_block, json_schema] if p]\n    return \"\\n\\n---\\n\\n\".join(parts)\n```",
+      "priority": "must-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "The order is crucial: context first so the LLM knows what it's analyzing, then instructions, then output format."
+    },
+    {
+      "title": "Update _parse_markdown_prompt() to set metadata correctly",
+      "description": "Modify the markdown parser to detect whether the prompt already has JSON schema and set flags accordingly:\n\n```python\ndef _parse_markdown_prompt(self, file_path: Path) -> Optional[Prompt]:\n    try:\n        content = file_path.read_text(encoding=\"utf-8\")\n        prompt_id = file_path.stem\n        \n        # Extract title\n        title_match = re.search(r\"^#\\s+(.+)$\", content, re.MULTILINE)\n        goal = title_match.group(1).strip() if title_match else prompt_id.replace(\"_\", \" \").title()\n        \n        # Extract category from filename prefix\n        category = prompt_id.split(\"_\")[0] if \"_\" in prompt_id else None\n        \n        # Check if prompt already includes JSON schema instructions\n        has_json = bool(re.search(r'\"summary\".*\"recommendations\".*\"tasks\"', content, re.DOTALL))\n        \n        # Map category to stage\n        stage_mapping = {...}  # existing mapping\n        stage = stage_mapping.get(category, \"analysis\")\n        \n        return Prompt(\n            id=prompt_id,\n            goal=goal,\n            template=content,\n            stage=stage,\n            category=category,\n            source='markdown',\n            has_json_schema=has_json,\n        )\n    except Exception:\n        return None\n```",
+      "priority": "must-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "The meta_triage.md prompt DOES have JSON schema, so this detection is important."
+    },
+    {
+      "title": "Improve JSON parsing robustness in analysis.py",
+      "description": "Enhance _parse_response() to handle more edge cases and provide better fallbacks:\n\n```python\ndef _parse_response(self, content: str) -> AnalysisResult:\n    # Try multiple JSON extraction strategies\n    json_str = None\n    \n    # Strategy 1: Look for ```json ... ``` block\n    json_match = re.search(r\"```(?:json)?\\s*([\\s\\S]*?)```\", content)\n    if json_match:\n        json_str = json_match.group(1).strip()\n    \n    # Strategy 2: Look for raw JSON object\n    if not json_str:\n        brace_match = re.search(r'(\\{[\\s\\S]*\\})', content)\n        if brace_match:\n            json_str = brace_match.group(1)\n    \n    if json_str:\n        try:\n            # Clean up common issues\n            json_str = re.sub(r',\\s*}', '}', json_str)  # trailing commas\n            json_str = re.sub(r',\\s*]', ']', json_str)\n            \n            data = json.loads(json_str)\n            return AnalysisResult(\n                summary=data.get(\"summary\", \"\"),\n                recommendations=data.get(\"recommendations\", []),\n                tasks=self._normalize_tasks(data.get(\"tasks\", [])),\n                raw_response=content,\n                success=True,\n            )\n        except json.JSONDecodeError as e:\n            logger.warning(f\"JSON parse failed: {e}\")\n    \n    # Fallback: Create structured result from raw text\n    return self._create_fallback_result(content)\n\ndef _normalize_tasks(self, tasks: list) -> list:\n    \"\"\"Ensure tasks have required fields.\"\"\"\n    normalized = []\n    for task in tasks:\n        normalized.append({\n            'title': task.get('title', 'Untitled task'),\n            'description': task.get('description', ''),\n            'priority': task.get('priority', 'medium').lower(),\n            'file': task.get('file', ''),\n        })\n    return normalized\n```",
+      "priority": "must-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/analysis.py"],
+      "notes": "Robust parsing is essential because LLMs don't always produce perfect JSON."
+    },
+    {
+      "title": "Add fallback result creation for unparseable responses",
+      "description": "Create a method to extract useful information even when JSON parsing fails:\n\n```python\ndef _create_fallback_result(self, content: str) -> AnalysisResult:\n    \"\"\"Create a structured result from unstructured text.\"\"\"\n    # Extract bullet points as potential tasks\n    tasks = []\n    bullet_pattern = re.compile(r'^\\s*[-*•]\\s+(.+)$', re.MULTILINE)\n    for match in bullet_pattern.finditer(content):\n        text = match.group(1).strip()\n        if len(text) > 10:  # Skip very short bullets\n            tasks.append({\n                'title': text[:80] + '...' if len(text) > 80 else text,\n                'description': text,\n                'priority': 'medium',\n                'file': '',\n            })\n    \n    # Use first paragraph as summary\n    paragraphs = content.split('\\n\\n')\n    summary = paragraphs[0][:500] if paragraphs else content[:500]\n    \n    return AnalysisResult(\n        summary=summary,\n        recommendations=[],\n        tasks=tasks[:10],  # Limit to 10 tasks\n        raw_response=content,\n        success=True,\n    )\n```",
+      "priority": "should-have",
+      "area": "orchestrator",
+      "files": ["src/metaagent/analysis.py"],
+      "notes": "This ensures the system degrades gracefully when prompts produce unexpected output."
+    },
+    {
+      "title": "Create stage-to-prompt mapping helper",
+      "description": "Add a method to PromptLibrary that maps conceptual stages to appropriate Codebase Digest prompts:\n\n```python\n# In prompts.py\nDEFAULT_STAGE_PROMPTS = {\n    'alignment': ['meta_triage'],  # Uses the special triage prompt\n    'architecture': [\n        'architecture_layer_identification',\n        'architecture_design_pattern_identification',\n        'architecture_coupling_cohesion_analysis',\n    ],\n    'quality': [\n        'quality_error_analysis',\n        'quality_code_complexity_analysis',\n    ],\n    'hardening': [\n        'quality_error_analysis',\n        'quality_risk_assessment',\n    ],\n    'testing': [\n        'testing_unit_test_generation',\n    ],\n    'security': [\n        'security_vulnerability_analysis',\n    ],\n    'performance': [\n        'performance_bottleneck_identification',\n        'performance_scalability_analysis',\n    ],\n}\n\ndef get_prompts_for_stage(self, stage: str) -> list[Prompt]:\n    \"\"\"Get recommended prompts for a conceptual stage.\"\"\"\n    prompt_ids = DEFAULT_STAGE_PROMPTS.get(stage, [])\n    return [self.get_prompt(pid) for pid in prompt_ids if self.get_prompt(pid)]\n```",
+      "priority": "should-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "This provides a sensible default mapping while still allowing profiles.yaml to override."
+    },
+    {
+      "title": "Update profiles.yaml to use recommended Codebase Digest prompts",
+      "description": "Review and update profiles.yaml to ensure it references the most relevant Codebase Digest prompts for each use case. Current profiles already reference them correctly (e.g., automation_agent uses architecture_layer_identification, quality_error_analysis, etc.), but verify alignment with PRD goals:\n\n```yaml\nprofiles:\n  prd_alignment:\n    name: \"PRD Alignment Check\"\n    description: \"Validate implementation against PRD requirements\"\n    stages:\n      - meta_triage  # Triage first to assess current state\n      - quality_error_analysis  # Find implementation errors\n      - improvement_best_practice_analysis  # Check best practices\n```",
+      "priority": "should-have",
+      "area": "config",
+      "files": ["config/profiles.yaml"],
+      "notes": "Add a new 'prd_alignment' profile that focuses on PRD compliance, as this is a key PRD requirement."
+    },
+    {
+      "title": "Remove or deprecate redundant prompts.yaml templates",
+      "description": "The prompts.yaml contains custom prompts (alignment_with_prd, architecture_sanity, core_flow_hardening, test_suite_mvp) that duplicate functionality from Codebase Digest prompts. Either:\n\n1. Remove them and use Codebase Digest prompts exclusively\n2. Keep them as 'lightweight' alternatives with JSON schema built-in\n\nRecommendation: Keep prompts.yaml prompts as fallbacks but mark them clearly:\n\n```yaml\nprompts:\n  # Legacy custom prompts (use Codebase Digest prompts for comprehensive analysis)\n  alignment_with_prd:\n    id: alignment_with_prd\n    goal: \"Quick PRD alignment check (use meta_triage for full analysis)\"\n    ...\n```",
+      "priority": "nice-to-have",
+      "area": "config",
+      "files": ["config/prompts.yaml"],
+      "notes": "Reduces confusion about which prompts to use."
+    },
+    {
+      "title": "Add integration test for Codebase Digest prompt execution",
+      "description": "Create a test that verifies the full flow: load a Codebase Digest prompt -> render with context -> parse response -> extract tasks:\n\n```python\n# tests/test_codebase_digest_integration.py\ndef test_codebase_digest_prompt_produces_structured_output(\n    prompt_library, mock_analysis_engine\n):\n    \"\"\"Verify Codebase Digest prompts produce parseable JSON output.\"\"\"\n    prompt = prompt_library.get_prompt('quality_error_analysis')\n    assert prompt is not None\n    assert prompt.source == 'markdown'\n    assert prompt.has_json_schema == False\n    \n    rendered = prompt.render(\n        prd='Test PRD content',\n        code_context='def foo(): pass',\n        history='No previous analysis',\n    )\n    \n    # Verify JSON schema was appended\n    assert '\"summary\"' in rendered\n    assert '\"recommendations\"' in rendered\n    assert '\"tasks\"' in rendered\n    \n    # Verify context is at the start\n    assert rendered.index('Test PRD content') < rendered.index('quality_error_analysis')\n```",
+      "priority": "should-have",
+      "area": "orchestrator",
+      "files": ["tests/test_codebase_digest_integration.py"],
+      "notes": "Ensures the integration works end-to-end."
+    },
+    {
+      "title": "Add logging for prompt rendering decisions",
+      "description": "Add debug logging to track which prompts are being used and how they're being rendered:\n\n```python\nimport logging\nlogger = logging.getLogger(__name__)\n\ndef render(self, ...):\n    logger.debug(\n        f\"Rendering prompt '{self.id}' (source={self.source}, \"\n        f\"has_json_schema={self.has_json_schema})\"\n    )\n    ...\n    if not self.has_json_schema:\n        logger.debug(f\"Appending JSON schema to prompt '{self.id}'\")\n    ...\n```",
+      "priority": "nice-to-have",
+      "area": "prompt_wiring",
+      "files": ["src/metaagent/prompts.py"],
+      "notes": "Helps debug issues when prompts don't produce expected output."
+    },
+    {
+      "title": "Document the prompt wrapping architecture",
+      "description": "Add documentation explaining how prompts are processed:\n\n```markdown\n# Prompt Processing Architecture\n\n## Prompt Sources\n1. **YAML prompts** (config/prompts.yaml): Custom prompts with built-in JSON schema\n2. **Codebase Digest prompts** (config/prompt_library/*.md): External prompts requiring JSON schema wrapper\n\n## Rendering Flow\n1. Context sections (PRD, codebase, history) are assembled\n2. The prompt template is added\n3. For Codebase Digest prompts, JSON response schema is appended\n4. Final prompt is sent to analysis engine\n\n## Expected Response Format\nAll analysis prompts must produce JSON with:\n- summary: Brief overview\n- recommendations: List of high-level suggestions  \n- tasks: Actionable items with title, description, priority, file\n```",
+      "priority": "nice-to-have",
+      "area": "config",
+      "files": ["docs/prompt_architecture.md", "README.md"],
+      "notes": "Important for maintainability and onboarding."
+    }
+  ]
+}

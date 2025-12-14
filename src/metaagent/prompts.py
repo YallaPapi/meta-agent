@@ -2,13 +2,71 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from jinja2 import Template
+
+logger = logging.getLogger(__name__)
+
+
+# JSON response schema to append to Codebase Digest prompts that don't have their own schema
+JSON_RESPONSE_SCHEMA = '''
+
+---
+
+## Required Response Format
+
+You MUST respond with valid JSON in exactly this structure:
+```json
+{
+  "summary": "2-4 sentence overview of your analysis findings",
+  "recommendations": ["High-level recommendation 1", "High-level recommendation 2"],
+  "tasks": [
+    {
+      "title": "Short task title",
+      "description": "Detailed description of what needs to be done",
+      "priority": "critical|high|medium|low",
+      "file": "path/to/relevant/file.py"
+    }
+  ]
+}
+```
+
+Do not include any text outside the JSON block.
+'''
+
+
+# Default mapping from conceptual stages to recommended Codebase Digest prompts
+DEFAULT_STAGE_PROMPTS = {
+    'alignment': ['meta_triage'],
+    'architecture': [
+        'architecture_layer_identification',
+        'architecture_design_pattern_identification',
+        'architecture_coupling_cohesion_analysis',
+    ],
+    'quality': [
+        'quality_error_analysis',
+        'quality_code_complexity_analysis',
+    ],
+    'hardening': [
+        'quality_error_analysis',
+        'quality_risk_assessment',
+    ],
+    'testing': [
+        'testing_unit_test_generation',
+    ],
+    'security': [
+        'security_vulnerability_analysis',
+    ],
+    'performance': [
+        'performance_bottleneck_identification',
+        'performance_scalability_analysis',
+    ],
+}
 
 
 @dataclass
@@ -22,6 +80,8 @@ class Prompt:
     dependencies: list[str] = field(default_factory=list)
     when_to_use: Optional[str] = None
     category: Optional[str] = None
+    source: str = 'yaml'  # 'yaml' or 'markdown'
+    has_json_schema: bool = True  # Whether template includes JSON schema
 
     def render(
         self,
@@ -32,6 +92,11 @@ class Prompt:
     ) -> str:
         """Render the prompt template with variables.
 
+        Builds the prompt in the correct order:
+        1. Context sections (PRD, codebase, history) - so LLM knows what it's analyzing
+        2. The analysis prompt/instructions
+        3. JSON schema (for markdown prompts without built-in schema)
+
         Args:
             prd: The PRD content.
             code_context: The packed codebase content.
@@ -41,10 +106,12 @@ class Prompt:
         Returns:
             Rendered prompt string.
         """
-        # Build the full prompt with context
-        full_prompt = self.template
+        logger.debug(
+            f"Rendering prompt '{self.id}' (source={self.source}, "
+            f"has_json_schema={self.has_json_schema})"
+        )
 
-        # Add context sections if provided
+        # 1. Build context header (context comes FIRST)
         context_sections = []
         if prd:
             context_sections.append(f"## Product Requirements Document (PRD)\n\n{prd}")
@@ -53,10 +120,20 @@ class Prompt:
         if history:
             context_sections.append(f"## Previous Analysis\n\n{history}")
 
-        if context_sections:
-            full_prompt = full_prompt + "\n\n---\n\n" + "\n\n---\n\n".join(context_sections)
+        context_block = "\n\n---\n\n".join(context_sections) if context_sections else ""
 
-        return full_prompt
+        # 2. The analysis prompt/instructions
+        prompt_block = self.template
+
+        # 3. Add JSON schema if this prompt doesn't have one
+        json_schema = ""
+        if not self.has_json_schema:
+            logger.debug(f"Appending JSON schema to prompt '{self.id}'")
+            json_schema = JSON_RESPONSE_SCHEMA
+
+        # Build final prompt: context -> instructions -> schema
+        parts = [p for p in [context_block, prompt_block, json_schema] if p]
+        return "\n\n---\n\n".join(parts)
 
 
 @dataclass
@@ -153,8 +230,21 @@ class PromptLibrary:
                 "improvement": "improvement",
                 "learning": "learning",
                 "business": "business",
+                "meta": "triage",
             }
             stage = stage_mapping.get(category, "analysis")
+
+            # Check if prompt already includes JSON schema instructions
+            # Look for the key JSON fields that indicate structured output is expected
+            has_json_schema = bool(
+                re.search(r'"summary".*"recommendations".*"tasks"', content, re.DOTALL)
+                or re.search(r'"assessment".*"selected_prompts".*"done"', content, re.DOTALL)
+            )
+
+            logger.debug(
+                f"Loaded markdown prompt '{prompt_id}': category={category}, "
+                f"has_json_schema={has_json_schema}"
+            )
 
             return Prompt(
                 id=prompt_id,
@@ -162,12 +252,18 @@ class PromptLibrary:
                 template=content,
                 stage=stage,
                 category=category,
+                source='markdown',
+                has_json_schema=has_json_schema,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to parse markdown prompt {file_path}: {e}")
             return None
 
     def _load_yaml_prompts(self) -> None:
-        """Load prompts from YAML file (legacy support)."""
+        """Load prompts from YAML file (legacy support).
+
+        YAML prompts are assumed to have built-in JSON schema.
+        """
         if not self.prompts_path:
             return
 
@@ -183,6 +279,8 @@ class PromptLibrary:
                 stage=prompt_data.get("stage", ""),
                 dependencies=prompt_data.get("dependencies", []),
                 when_to_use=prompt_data.get("when_to_use"),
+                source='yaml',
+                has_json_schema=True,  # YAML prompts have built-in schema
             )
 
     def _load_profiles(self) -> None:
@@ -278,3 +376,18 @@ class PromptLibrary:
             if prompt:
                 prompts.append(prompt)
         return prompts
+
+    def get_prompts_for_stage(self, stage: str) -> list[Prompt]:
+        """Get recommended prompts for a conceptual stage.
+
+        Uses DEFAULT_STAGE_PROMPTS mapping to find appropriate prompts.
+
+        Args:
+            stage: The conceptual stage name (e.g., 'architecture', 'quality').
+
+        Returns:
+            List of Prompt instances for the stage.
+        """
+        self.load()
+        prompt_ids = DEFAULT_STAGE_PROMPTS.get(stage, [])
+        return [self.get_prompt(pid) for pid in prompt_ids if self.get_prompt(pid)]
