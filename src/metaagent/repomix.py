@@ -56,26 +56,42 @@ class RepomixRunner:
                 output_path = Path(tmp_file.name)
 
             try:
-                result = subprocess.run(
-                    [
-                        "npx",
-                        "repomix",
-                        "--output",
-                        str(output_path),
-                        "--style",
-                        "markdown",
-                    ],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                )
+                # Try repomix directly first (if installed globally)
+                # Fall back to npx repomix if direct call fails
+                # On Windows, use shell=True to properly resolve PATH
+                import platform
+                use_shell = platform.system() == "Windows"
 
-                if result.returncode != 0:
+                cmd_options = [
+                    "repomix --output {} --style markdown".format(str(output_path)),
+                    "npx repomix --output {} --style markdown".format(str(output_path)),
+                ]
+
+                result = None
+                last_error = None
+
+                for cmd in cmd_options:
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            cwd=repo_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.timeout,
+                            shell=use_shell,
+                        )
+                        if result.returncode == 0:
+                            break
+                        last_error = result.stderr
+                    except FileNotFoundError:
+                        last_error = f"Command not found: {cmd.split()[0]}"
+                        continue
+
+                if result is None or result.returncode != 0:
                     return RepomixResult(
                         content="",
                         success=False,
-                        error=f"Repomix failed: {result.stderr}",
+                        error=f"Repomix failed: {last_error}",
                     )
 
                 content = output_path.read_text(encoding="utf-8")

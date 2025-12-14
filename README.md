@@ -48,7 +48,19 @@ METAAGENT_LOG_LEVEL=INFO
 
 - **Python 3.10+**
 - **Repomix** (for codebase packing): `npm install -g repomix`
+- **codebase-digest** (for directory tree & metrics): `pip install codebase-digest` (installed automatically)
 - **Perplexity API key** (for analysis, or use `--mock` mode)
+
+### Codebase Analysis Tools
+
+Meta-agent uses two complementary tools for comprehensive codebase analysis:
+
+| Tool | Purpose | Output |
+|------|---------|--------|
+| **codebase-digest** | Directory structure & metrics | Tree view, file counts, token estimates |
+| **Repomix** | Full file contents | All source code packed into one file |
+
+Both tools run automatically during refinement, providing the LLM with both high-level structure and detailed code content.
 
 ## Usage
 

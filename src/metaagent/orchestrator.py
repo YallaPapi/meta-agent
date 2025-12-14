@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .analysis import AnalysisEngine, AnalysisResult, create_analysis_engine
+from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
 from .plan_writer import PlanWriter, StageResult
 from .prompts import PromptLibrary
@@ -65,6 +66,7 @@ class Orchestrator:
         config: Config,
         prompt_library: Optional[PromptLibrary] = None,
         repomix_runner: Optional[RepomixRunner] = None,
+        digest_runner: Optional[CodebaseDigestRunner] = None,
         analysis_engine: Optional[AnalysisEngine] = None,
         plan_writer: Optional[PlanWriter] = None,
     ):
@@ -74,6 +76,7 @@ class Orchestrator:
             config: Configuration settings.
             prompt_library: Optional PromptLibrary instance.
             repomix_runner: Optional RepomixRunner instance.
+            digest_runner: Optional CodebaseDigestRunner instance.
             analysis_engine: Optional AnalysisEngine instance.
             plan_writer: Optional PlanWriter instance.
         """
@@ -88,6 +91,12 @@ class Orchestrator:
         self.repomix_runner = repomix_runner or RepomixRunner(
             timeout=config.timeout,
             max_chars=config.max_tokens * 4,  # Rough char-to-token ratio
+        )
+
+        self.digest_runner = digest_runner or CodebaseDigestRunner(
+            max_depth=10,
+            output_format="markdown",
+            include_content=False,  # We get content from Repomix
         )
 
         self.analysis_engine = analysis_engine or create_analysis_engine(
@@ -133,20 +142,33 @@ class Orchestrator:
                 error=f"Profile not found: {profile_id}",
             )
 
-        # Run Repomix
+        # Run codebase-digest for directory tree and metrics
+        logger.info("Analyzing codebase structure with codebase-digest...")
+        digest_result = self.digest_runner.analyze(self.config.repo_path)
+
+        if digest_result.success:
+            logger.info("Codebase structure analysis complete")
+            structure_context = self._format_digest_output(digest_result)
+        else:
+            logger.warning(f"codebase-digest failed: {digest_result.error}")
+            structure_context = ""
+
+        # Run Repomix for full file contents
         logger.info("Packing codebase with Repomix...")
         repomix_result = self.repomix_runner.pack(self.config.repo_path)
 
         if not repomix_result.success:
             logger.warning(f"Repomix failed: {repomix_result.error}")
-            # Continue with empty code context - some analysis may still work
-            code_context = f"[Repomix failed: {repomix_result.error}]"
+            file_contents = f"[Repomix failed: {repomix_result.error}]"
         else:
-            code_context = repomix_result.content
+            file_contents = repomix_result.content
             if repomix_result.truncated:
                 logger.warning(
                     f"Codebase was truncated from {repomix_result.original_size} chars"
                 )
+
+        # Combine both outputs for comprehensive code context
+        code_context = self._build_code_context(structure_context, file_contents)
 
         # Run stages
         history = RunHistory()
@@ -232,3 +254,53 @@ class Orchestrator:
             return None
 
         return prd_path.read_text(encoding="utf-8")
+
+    def _format_digest_output(self, digest_result: DigestResult) -> str:
+        """Format codebase-digest output for inclusion in prompts.
+
+        Args:
+            digest_result: Result from codebase-digest analysis.
+
+        Returns:
+            Formatted string with directory tree and metrics.
+        """
+        sections = []
+
+        if digest_result.tree:
+            sections.append("## Directory Structure")
+            sections.append(digest_result.tree)
+
+        if digest_result.metrics:
+            sections.append("\n## Codebase Metrics")
+            sections.append(digest_result.metrics)
+
+        return "\n".join(sections) if sections else ""
+
+    def _build_code_context(self, structure_context: str, file_contents: str) -> str:
+        """Build comprehensive code context from both tools.
+
+        Args:
+            structure_context: Directory tree and metrics from codebase-digest.
+            file_contents: Full file contents from Repomix.
+
+        Returns:
+            Combined code context string.
+        """
+        sections = []
+
+        if structure_context:
+            sections.append("# Codebase Overview (from codebase-digest)")
+            sections.append(structure_context)
+            sections.append("\n---\n")
+
+        if file_contents and not file_contents.startswith("["):
+            sections.append("# File Contents (from Repomix)")
+            sections.append(file_contents)
+        elif file_contents:
+            # Repomix failed, include the error message
+            sections.append(file_contents)
+
+        if not sections:
+            return "[No codebase context available - both codebase-digest and Repomix failed]"
+
+        return "\n".join(sections)
