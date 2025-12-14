@@ -136,7 +136,11 @@ def refine(
 
     # Check if profile exists
     try:
-        prompt_library = PromptLibrary(config.prompts_file, config.profiles_file)
+        prompt_library = PromptLibrary(
+            prompts_path=config.prompts_file,
+            profiles_path=config.profiles_file,
+            prompt_library_path=config.prompt_library_path,
+        )
         prompt_library.load()
 
         if not prompt_library.get_profile(profile):
@@ -199,6 +203,7 @@ def list_profiles(
         prompt_library = PromptLibrary(
             prompts_path=cfg_dir / "prompts.yaml",
             profiles_path=cfg_dir / "profiles.yaml",
+            prompt_library_path=cfg_dir / "prompt_library",
         )
         prompt_library.load()
     except FileNotFoundError as e:
@@ -217,10 +222,72 @@ def list_profiles(
     table.add_column("Stages", style="dim")
 
     for profile in profiles:
-        stages = ", ".join(profile.stages)
+        stages = ", ".join(profile.stages[:3])
+        if len(profile.stages) > 3:
+            stages += f" (+{len(profile.stages) - 3} more)"
         table.add_row(profile.name, profile.description, stages)
 
     console.print(table)
+
+
+@app.command("list-prompts")
+def list_prompts(
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        "-c",
+        help="Path to config directory.",
+    ),
+    category: Optional[str] = typer.Option(
+        None,
+        "--category",
+        help="Filter by category (e.g., 'quality', 'architecture').",
+    ),
+) -> None:
+    """List available analysis prompts from codebase-digest."""
+    # Determine config directory
+    cfg_dir = config_dir.resolve() if config_dir else Path.cwd() / "config"
+
+    if not cfg_dir.exists():
+        console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")
+        raise typer.Exit(1)
+
+    prompt_library = PromptLibrary(
+        prompts_path=cfg_dir / "prompts.yaml",
+        profiles_path=cfg_dir / "profiles.yaml",
+        prompt_library_path=cfg_dir / "prompt_library",
+    )
+    prompt_library.load()
+
+    by_category = prompt_library.list_prompts_by_category()
+
+    if not by_category:
+        console.print("[yellow]No prompts found.[/yellow]")
+        return
+
+    # Filter by category if specified
+    if category:
+        if category not in by_category:
+            console.print(f"[red]Error:[/red] Category '{category}' not found.")
+            console.print(f"Available categories: {', '.join(sorted(by_category.keys()))}")
+            raise typer.Exit(1)
+        by_category = {category: by_category[category]}
+
+    total = sum(len(prompts) for prompts in by_category.values())
+    console.print(f"\n[bold]Available Prompts ({total} total)[/bold]\n")
+
+    for cat_name in sorted(by_category.keys()):
+        prompts = by_category[cat_name]
+        table = Table(title=f"{cat_name.title()} ({len(prompts)} prompts)")
+        table.add_column("ID", style="cyan")
+        table.add_column("Goal")
+
+        for prompt in sorted(prompts, key=lambda p: p.id):
+            goal = prompt.goal[:60] + "..." if len(prompt.goal) > 60 else prompt.goal
+            table.add_row(prompt.id, goal)
+
+        console.print(table)
+        console.print()
 
 
 if __name__ == "__main__":

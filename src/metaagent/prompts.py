@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,7 @@ class Prompt:
     stage: str
     dependencies: list[str] = field(default_factory=list)
     when_to_use: Optional[str] = None
+    category: Optional[str] = None
 
     def render(
         self,
@@ -39,13 +41,22 @@ class Prompt:
         Returns:
             Rendered prompt string.
         """
-        template = Template(self.template)
-        return template.render(
-            prd=prd,
-            code_context=code_context,
-            history=history,
-            current_stage=current_stage or self.stage,
-        )
+        # Build the full prompt with context
+        full_prompt = self.template
+
+        # Add context sections if provided
+        context_sections = []
+        if prd:
+            context_sections.append(f"## Product Requirements Document (PRD)\n\n{prd}")
+        if code_context:
+            context_sections.append(f"## Codebase\n\n{code_context}")
+        if history:
+            context_sections.append(f"## Previous Analysis\n\n{history}")
+
+        if context_sections:
+            full_prompt = full_prompt + "\n\n---\n\n" + "\n\n---\n\n".join(context_sections)
+
+        return full_prompt
 
 
 @dataclass
@@ -60,21 +71,28 @@ class Profile:
 class PromptLibrary:
     """Manages loading and accessing prompts and profiles."""
 
-    def __init__(self, prompts_path: Path, profiles_path: Path):
+    def __init__(
+        self,
+        prompts_path: Optional[Path] = None,
+        profiles_path: Optional[Path] = None,
+        prompt_library_path: Optional[Path] = None,
+    ):
         """Initialize the prompt library.
 
         Args:
-            prompts_path: Path to prompts.yaml file.
+            prompts_path: Path to prompts.yaml file (legacy, optional).
             profiles_path: Path to profiles.yaml file.
+            prompt_library_path: Path to directory containing markdown prompts.
         """
         self.prompts_path = prompts_path
         self.profiles_path = profiles_path
+        self.prompt_library_path = prompt_library_path
         self._prompts: dict[str, Prompt] = {}
         self._profiles: dict[str, Profile] = {}
         self._loaded = False
 
     def load(self) -> None:
-        """Load prompts and profiles from YAML files."""
+        """Load prompts and profiles from files."""
         if self._loaded:
             return
 
@@ -83,9 +101,75 @@ class PromptLibrary:
         self._loaded = True
 
     def _load_prompts(self) -> None:
-        """Load prompts from YAML file."""
-        if not self.prompts_path.exists():
-            raise FileNotFoundError(f"Prompts file not found: {self.prompts_path}")
+        """Load prompts from markdown files and optional YAML."""
+        # Load from markdown prompt library (primary source)
+        if self.prompt_library_path and self.prompt_library_path.exists():
+            self._load_markdown_prompts()
+
+        # Also load from YAML if provided (for backwards compatibility)
+        if self.prompts_path and self.prompts_path.exists():
+            self._load_yaml_prompts()
+
+    def _load_markdown_prompts(self) -> None:
+        """Load prompts from markdown files in prompt_library directory."""
+        if not self.prompt_library_path:
+            return
+
+        for md_file in self.prompt_library_path.glob("*.md"):
+            prompt = self._parse_markdown_prompt(md_file)
+            if prompt:
+                self._prompts[prompt.id] = prompt
+
+    def _parse_markdown_prompt(self, file_path: Path) -> Optional[Prompt]:
+        """Parse a markdown file into a Prompt object.
+
+        Args:
+            file_path: Path to the markdown file.
+
+        Returns:
+            Prompt object or None if parsing fails.
+        """
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            prompt_id = file_path.stem  # filename without extension
+
+            # Extract title (first heading) as the goal
+            title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            goal = title_match.group(1).strip() if title_match else prompt_id.replace("_", " ").title()
+
+            # Extract category from filename prefix
+            category = None
+            if "_" in prompt_id:
+                category = prompt_id.split("_")[0]
+
+            # Determine stage from category
+            stage_mapping = {
+                "architecture": "architecture",
+                "quality": "quality",
+                "performance": "performance",
+                "security": "security",
+                "testing": "testing",
+                "evolution": "evolution",
+                "improvement": "improvement",
+                "learning": "learning",
+                "business": "business",
+            }
+            stage = stage_mapping.get(category, "analysis")
+
+            return Prompt(
+                id=prompt_id,
+                goal=goal,
+                template=content,
+                stage=stage,
+                category=category,
+            )
+        except Exception:
+            return None
+
+    def _load_yaml_prompts(self) -> None:
+        """Load prompts from YAML file (legacy support)."""
+        if not self.prompts_path:
+            return
 
         with open(self.prompts_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -103,8 +187,8 @@ class PromptLibrary:
 
     def _load_profiles(self) -> None:
         """Load profiles from YAML file."""
-        if not self.profiles_path.exists():
-            raise FileNotFoundError(f"Profiles file not found: {self.profiles_path}")
+        if not self.profiles_path or not self.profiles_path.exists():
+            return  # No profiles file, just skip
 
         with open(self.profiles_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -149,6 +233,30 @@ class PromptLibrary:
         """
         self.load()
         return list(self._profiles.values())
+
+    def list_prompts(self) -> list[Prompt]:
+        """Get all available prompts.
+
+        Returns:
+            List of Prompt instances.
+        """
+        self.load()
+        return list(self._prompts.values())
+
+    def list_prompts_by_category(self) -> dict[str, list[Prompt]]:
+        """Get all prompts organized by category.
+
+        Returns:
+            Dict mapping category names to lists of Prompts.
+        """
+        self.load()
+        by_category: dict[str, list[Prompt]] = {}
+        for prompt in self._prompts.values():
+            cat = prompt.category or "other"
+            if cat not in by_category:
+                by_category[cat] = []
+            by_category[cat].append(prompt)
+        return by_category
 
     def get_prompts_for_profile(self, profile_id: str) -> list[Prompt]:
         """Get all prompts for a profile's stages in order.

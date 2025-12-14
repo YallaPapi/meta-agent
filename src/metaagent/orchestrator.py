@@ -86,6 +86,7 @@ class Orchestrator:
         self.prompt_library = prompt_library or PromptLibrary(
             prompts_path=config.prompts_file,
             profiles_path=config.profiles_file,
+            prompt_library_path=config.prompt_library_path,
         )
 
         self.repomix_runner = repomix_runner or RepomixRunner(

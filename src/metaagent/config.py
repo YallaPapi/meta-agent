@@ -78,10 +78,15 @@ class Config:
 
     @property
     def prompts_file(self) -> Path:
-        """Path to prompts.yaml file."""
+        """Path to prompts.yaml file (legacy)."""
         return self.config_dir / "prompts.yaml"
 
     @property
     def profiles_file(self) -> Path:
         """Path to profiles.yaml file."""
         return self.config_dir / "profiles.yaml"
+
+    @property
+    def prompt_library_path(self) -> Path:
+        """Path to prompt_library directory with markdown prompts."""
+        return self.config_dir / "prompt_library"

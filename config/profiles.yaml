@@ -1,42 +1,129 @@
 profiles:
   automation_agent:
     name: "Automation Agent"
-    description: "Profile for CLI tools and automation agents. Focuses on robustness, error handling, and user experience."
+    description: "Profile for CLI tools and automation agents. Focuses on architecture, quality, and testing."
     stages:
-      - alignment_with_prd
-      - architecture_sanity
-      - core_flow_hardening
-      - test_suite_mvp
+      - architecture_layer_identification
+      - architecture_design_pattern_identification
+      - quality_error_analysis
+      - quality_code_complexity_analysis
+      - testing_unit_test_generation
+      - improvement_best_practice_analysis
 
   backend_service:
     name: "Backend Service"
-    description: "Profile for API backends and services. Includes security review and emphasizes reliability."
+    description: "Profile for API backends and services. Includes security review and API analysis."
     stages:
-      - alignment_with_prd
-      - architecture_sanity
-      - security_review
-      - core_flow_hardening
-      - test_suite_mvp
+      - architecture_layer_identification
+      - architecture_api_conformance_check
+      - architecture_database_schema_review
+      - security_vulnerability_analysis
+      - quality_error_analysis
+      - performance_bottleneck_identification
+      - testing_unit_test_generation
 
   internal_tool:
     name: "Internal Tool"
-    description: "Lighter profile for internal developer tools. Focuses on core functionality and basic hardening."
+    description: "Lighter profile for internal developer tools. Focuses on core functionality."
     stages:
-      - alignment_with_prd
-      - core_flow_hardening
+      - architecture_layer_identification
+      - quality_error_analysis
+      - improvement_refactoring
 
   quick_review:
     name: "Quick Review"
-    description: "Fast review focusing only on PRD alignment. Good for initial assessment."
+    description: "Fast review focusing on errors and code quality. Good for initial assessment."
     stages:
-      - alignment_with_prd
+      - quality_error_analysis
+      - quality_code_complexity_analysis
 
   full_review:
     name: "Full Review"
-    description: "Comprehensive review including all available analysis stages."
+    description: "Comprehensive review including architecture, quality, security, performance, and testing."
     stages:
-      - alignment_with_prd
-      - architecture_sanity
-      - security_review
-      - core_flow_hardening
-      - test_suite_mvp
+      - architecture_layer_identification
+      - architecture_design_pattern_identification
+      - architecture_coupling_cohesion_analysis
+      - quality_error_analysis
+      - quality_code_complexity_analysis
+      - quality_code_duplication_analysis
+      - quality_code_style_consistency_analysis
+      - security_vulnerability_analysis
+      - performance_bottleneck_identification
+      - performance_scalability_analysis
+      - testing_unit_test_generation
+      - evolution_technical_debt_estimation
+      - improvement_best_practice_analysis
+
+  architecture_deep_dive:
+    name: "Architecture Deep Dive"
+    description: "In-depth architectural analysis including patterns, layers, and coupling."
+    stages:
+      - architecture_layer_identification
+      - architecture_design_pattern_identification
+      - architecture_coupling_cohesion_analysis
+      - architecture_diagram_generation
+      - architecture_refactoring_for_design_patterns
+
+  quality_audit:
+    name: "Quality Audit"
+    description: "Comprehensive code quality analysis including complexity, duplication, and documentation."
+    stages:
+      - quality_error_analysis
+      - quality_code_complexity_analysis
+      - quality_code_duplication_analysis
+      - quality_code_style_consistency_analysis
+      - quality_code_documentation_coverage_analysis
+      - quality_risk_assessment
+
+  performance_analysis:
+    name: "Performance Analysis"
+    description: "Performance-focused analysis including bottlenecks, scalability, and optimization."
+    stages:
+      - performance_bottleneck_identification
+      - performance_code_optimization_suggestions
+      - performance_scalability_analysis
+      - performance_resource_usage_profiling
+      - performance_concurrency_synchronization_analysis
+
+  security_audit:
+    name: "Security Audit"
+    description: "Security-focused analysis and vulnerability detection."
+    stages:
+      - security_vulnerability_analysis
+      - quality_error_analysis
+      - quality_risk_assessment
+
+  evolution_assessment:
+    name: "Evolution Assessment"
+    description: "Analyze codebase evolution, technical debt, and refactoring opportunities."
+    stages:
+      - evolution_technical_debt_estimation
+      - evolution_code_churn_hotspot_analysis
+      - evolution_refactoring_recommendation_generation
+      - evolution_impact_analysis_of_code_changes
+      - improvement_refactoring
+
+  api_review:
+    name: "API Review"
+    description: "API-focused analysis for backend services."
+    stages:
+      - architecture_api_conformance_check
+      - architecture_api_client_code_generation
+      - learning_backend_api_documentation
+
+  database_review:
+    name: "Database Review"
+    description: "Database schema and data access analysis."
+    stages:
+      - architecture_database_schema_review
+      - architecture_database_schema_documentation
+
+  documentation_generation:
+    name: "Documentation Generation"
+    description: "Generate comprehensive documentation for the codebase."
+    stages:
+      - quality_documentation_generation
+      - learning_backend_api_documentation
+      - learning_frontend_component_documentation
+      - architecture_diagram_generation
