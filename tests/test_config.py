@@ -98,3 +98,29 @@ class TestConfig:
         )
 
         assert config.profiles_file == tmp_path / "config" / "profiles.yaml"
+
+    def test_from_env_retry_defaults(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Test default retry configuration values."""
+        # Prevent .env loading and clear env vars
+        monkeypatch.setattr("metaagent.config.load_dotenv", lambda: None)
+        monkeypatch.delenv("METAAGENT_RETRY_MAX_ATTEMPTS", raising=False)
+        monkeypatch.delenv("METAAGENT_RETRY_BACKOFF_BASE", raising=False)
+        monkeypatch.delenv("METAAGENT_RETRY_BACKOFF_MAX", raising=False)
+
+        config = Config.from_env(tmp_path)
+
+        assert config.retry_max_attempts == 3
+        assert config.retry_backoff_base == 2.0
+        assert config.retry_backoff_max == 60.0
+
+    def test_from_env_retry_custom(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Test custom retry configuration from environment."""
+        monkeypatch.setenv("METAAGENT_RETRY_MAX_ATTEMPTS", "5")
+        monkeypatch.setenv("METAAGENT_RETRY_BACKOFF_BASE", "1.5")
+        monkeypatch.setenv("METAAGENT_RETRY_BACKOFF_MAX", "120.0")
+
+        config = Config.from_env(tmp_path)
+
+        assert config.retry_max_attempts == 5
+        assert config.retry_backoff_base == 1.5
+        assert config.retry_backoff_max == 120.0

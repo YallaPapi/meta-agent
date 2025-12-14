@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# Valid priority values for tasks
+VALID_PRIORITIES = {"critical", "high", "medium", "low"}
 
 
 @dataclass
@@ -165,19 +171,69 @@ class PlanWriter:
 
         return "\n".join(sections)
 
+    def _normalize_task(self, task: dict, stage_id: str) -> Optional[dict]:
+        """Normalize and validate a task dict.
+
+        Args:
+            task: Raw task dictionary from analysis.
+            stage_id: ID of the stage this task came from.
+
+        Returns:
+            Normalized task dict, or None if invalid (missing title).
+        """
+        title = task.get("title", "")
+        if isinstance(title, str):
+            title = title.strip()
+
+        if not title:
+            logger.warning(f"Skipping task without title from stage {stage_id}")
+            return None
+
+        priority = task.get("priority", "medium")
+        if isinstance(priority, str):
+            priority = priority.lower().strip()
+        if priority not in VALID_PRIORITIES:
+            logger.debug(
+                f"Invalid priority '{priority}' for task '{title}', defaulting to medium"
+            )
+            priority = "medium"
+
+        return {
+            "title": title,
+            "description": task.get("description", "").strip() if isinstance(task.get("description"), str) else "",
+            "priority": priority,
+            "file": task.get("file"),
+            "stage": stage_id,
+        }
+
     def _aggregate_tasks(self, stage_results: list[StageResult]) -> list[dict]:
-        """Aggregate tasks from all stages, removing duplicates."""
+        """Aggregate tasks from all stages, removing duplicates.
+
+        Tasks are normalized and validated. Tasks without titles are skipped
+        with a warning. Duplicate titles are deduplicated (first occurrence wins).
+
+        Args:
+            stage_results: List of stage results to aggregate.
+
+        Returns:
+            List of normalized, deduplicated tasks.
+        """
         all_tasks = []
         seen_titles = set()
 
         for result in stage_results:
             for task in result.tasks:
-                title = task.get("title", "")
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
-                    # Add stage info to task
-                    task["stage"] = result.stage_id
-                    all_tasks.append(task)
+                normalized = self._normalize_task(task, result.stage_id)
+                if normalized is None:
+                    continue
+
+                title = normalized["title"]
+                if title in seen_titles:
+                    logger.debug(f"Skipping duplicate task: {title}")
+                    continue
+
+                seen_titles.add(title)
+                all_tasks.append(normalized)
 
         return all_tasks
 

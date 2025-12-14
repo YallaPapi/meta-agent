@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -12,6 +14,33 @@ from typing import Any, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Patterns for sensitive data that should be masked in error messages
+SENSITIVE_PATTERNS = [
+    (re.compile(r'(Bearer\s+)[A-Za-z0-9_-]+', re.IGNORECASE), r'\1[REDACTED]'),
+    (re.compile(r'(api[_-]?key["\s:=]+)[A-Za-z0-9_-]+', re.IGNORECASE), r'\1[REDACTED]'),
+    (re.compile(r'(Authorization["\s:=]+)[A-Za-z0-9_-]+', re.IGNORECASE), r'\1[REDACTED]'),
+    (re.compile(r'(pplx-)[A-Za-z0-9]+'), r'\1[REDACTED]'),  # Perplexity API key format
+    (re.compile(r'(sk-)[A-Za-z0-9]+'), r'\1[REDACTED]'),  # OpenAI/Anthropic key format
+]
+
+
+def sanitize_error(message: str) -> str:
+    """Sanitize error messages to remove sensitive data.
+
+    Masks API keys, bearer tokens, and other sensitive patterns
+    to prevent them from being logged or shown to users.
+
+    Args:
+        message: Error message that may contain sensitive data.
+
+    Returns:
+        Sanitized message with sensitive data masked.
+    """
+    result = message
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
 
 
 @dataclass
@@ -24,6 +53,112 @@ class AnalysisResult:
     raw_response: str = ""
     success: bool = True
     error: Optional[str] = None
+
+
+def extract_json_from_response(content: str) -> tuple[Optional[dict], str]:
+    """Extract JSON from LLM response using multiple strategies.
+
+    Tries multiple strategies in order:
+    1. Parse entire response as JSON
+    2. Extract from ```json code blocks
+    3. Find balanced braces (handles nested objects and strings)
+
+    Args:
+        content: Raw response content from LLM.
+
+    Returns:
+        Tuple of (parsed_dict or None, error_message).
+    """
+    if not content or not content.strip():
+        return None, "Empty response content"
+
+    # Strategy 1: Try parsing entire response as JSON
+    try:
+        return json.loads(content), ""
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Extract from markdown code block
+    json_block_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", content)
+    if json_block_match:
+        try:
+            return json.loads(json_block_match.group(1)), ""
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Find balanced braces (handles nested objects and strings)
+    try:
+        start = content.index('{')
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i, char in enumerate(content[start:], start):
+            if escape:
+                escape = False
+                continue
+            if char == '\\':
+                escape = True
+                continue
+            if char == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        json_str = content[start:i + 1]
+                        # Clean up common JSON issues
+                        json_str = re.sub(r',\s*}', '}', json_str)
+                        json_str = re.sub(r',\s*]', ']', json_str)
+                        return json.loads(json_str), ""
+                    except json.JSONDecodeError:
+                        break
+    except ValueError:
+        pass
+
+    return None, "Could not extract valid JSON from response"
+
+
+def validate_analysis_response(data: dict) -> tuple[bool, str]:
+    """Validate that response has required structure.
+
+    Checks:
+    - Response is a dict
+    - Has 'summary' field (string)
+    - 'recommendations' is a list if present
+    - 'tasks' is a list of dicts if present
+
+    Args:
+        data: Parsed JSON data to validate.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if not isinstance(data, dict):
+        return False, "Response is not a JSON object"
+
+    if "summary" not in data:
+        return False, "Missing required field: summary"
+
+    if not isinstance(data.get("summary", ""), str):
+        return False, "Field 'summary' must be a string"
+
+    if "recommendations" in data and not isinstance(data["recommendations"], list):
+        return False, "Field 'recommendations' must be a list"
+
+    if "tasks" in data:
+        if not isinstance(data["tasks"], list):
+            return False, "Field 'tasks' must be a list"
+        for i, task in enumerate(data["tasks"]):
+            if not isinstance(task, dict):
+                return False, f"Task at index {i} must be an object"
+
+    return True, ""
 
 
 class AnalysisEngine(ABC):
@@ -158,21 +293,86 @@ class PerplexityAnalysisEngine(AnalysisEngine):
 
     API_URL = "https://api.perplexity.ai/chat/completions"
 
-    def __init__(self, api_key: str, timeout: int = 120, model: str = "sonar-pro"):
+    # Status codes eligible for retry (transient errors)
+    RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+    def __init__(
+        self,
+        api_key: str,
+        timeout: int = 120,
+        model: str = "sonar-pro",
+        retry_max_attempts: int = 3,
+        retry_backoff_base: float = 2.0,
+        retry_backoff_max: float = 60.0,
+    ):
         """Initialize Perplexity analysis engine.
 
         Args:
             api_key: Perplexity API key.
             timeout: Request timeout in seconds.
             model: Model to use for analysis.
+            retry_max_attempts: Maximum number of retry attempts for transient errors.
+            retry_backoff_base: Base seconds for exponential backoff.
+            retry_backoff_max: Maximum backoff time in seconds.
         """
         self.api_key = api_key
         self.timeout = timeout
         self.model = model
+        self.retry_max_attempts = retry_max_attempts
+        self.retry_backoff_base = retry_backoff_base
+        self.retry_backoff_max = retry_backoff_max
         self.client = httpx.Client(timeout=timeout)
 
+    def _should_retry(self, error: Exception, attempt: int) -> bool:
+        """Determine if an error is transient and should be retried.
+
+        Args:
+            error: The exception that occurred.
+            attempt: Current attempt number (1-indexed).
+
+        Returns:
+            True if the error is transient and retry is allowed.
+        """
+        if attempt >= self.retry_max_attempts:
+            return False
+
+        # Timeout errors are always retryable
+        if isinstance(error, httpx.TimeoutException):
+            return True
+
+        # HTTP errors - check for retryable status codes
+        if isinstance(error, httpx.HTTPStatusError):
+            return error.response.status_code in self.RETRYABLE_STATUS_CODES
+
+        # Connection errors are retryable
+        if isinstance(error, (httpx.ConnectError, httpx.RemoteProtocolError)):
+            return True
+
+        return False
+
+    def _get_backoff_time(self, attempt: int, retry_after: Optional[int] = None) -> float:
+        """Calculate exponential backoff time with jitter.
+
+        Uses exponential backoff with full jitter strategy:
+        backoff = random(0, min(cap, base * 2^attempt))
+
+        Args:
+            attempt: Current attempt number (1-indexed).
+            retry_after: Optional Retry-After header value from server.
+
+        Returns:
+            Backoff time in seconds.
+        """
+        if retry_after is not None:
+            return float(retry_after)
+
+        exp_backoff = self.retry_backoff_base * (2 ** (attempt - 1))
+        capped_backoff = min(exp_backoff, self.retry_backoff_max)
+        # Add jitter: random value between 0 and capped_backoff
+        return random.uniform(0, capped_backoff)
+
     def analyze(self, prompt: str) -> AnalysisResult:
-        """Run analysis using Perplexity API.
+        """Run analysis using Perplexity API with retry logic.
 
         Args:
             prompt: The rendered prompt to send.
@@ -180,105 +380,157 @@ class PerplexityAnalysisEngine(AnalysisEngine):
         Returns:
             AnalysisResult with the analysis output.
         """
-        try:
-            response = self.client.post(
-                self.API_URL,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a code analysis expert. Analyze codebases and provide structured feedback in JSON format with keys: summary, recommendations, tasks.",
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        },
-                    ],
-                },
-            )
-            response.raise_for_status()
+        last_error: Optional[Exception] = None
 
-            data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        for attempt in range(1, self.retry_max_attempts + 1):
+            try:
+                response = self.client.post(
+                    self.API_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a code analysis expert. Analyze codebases and provide structured feedback in JSON format with keys: summary, recommendations, tasks.",
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            },
+                        ],
+                    },
+                )
+                response.raise_for_status()
 
-            return self._parse_response(content)
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-        except httpx.HTTPStatusError as e:
+                return self._parse_response(content)
+
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError,
+                    httpx.RemoteProtocolError) as e:
+                last_error = e
+
+                if self._should_retry(e, attempt):
+                    # Extract Retry-After header if present
+                    retry_after = None
+                    if isinstance(e, httpx.HTTPStatusError):
+                        retry_after_str = e.response.headers.get("Retry-After")
+                        if retry_after_str:
+                            try:
+                                retry_after = int(retry_after_str)
+                            except ValueError:
+                                pass
+
+                    backoff = self._get_backoff_time(attempt, retry_after)
+                    error_type = type(e).__name__
+                    status_info = ""
+                    if isinstance(e, httpx.HTTPStatusError):
+                        status_info = f" (status {e.response.status_code})"
+
+                    logger.warning(
+                        f"Transient error{status_info} on attempt {attempt}/{self.retry_max_attempts}: "
+                        f"{error_type}. Retrying in {backoff:.2f}s..."
+                    )
+                    time.sleep(backoff)
+                    continue
+
+                # Non-retryable error or max attempts reached
+                break
+
+            except Exception as e:
+                # Unexpected errors are not retried - sanitize to avoid leaking secrets
+                return AnalysisResult(
+                    summary="",
+                    success=False,
+                    error=sanitize_error(f"Unexpected error calling Perplexity API: {e}"),
+                )
+
+        # Handle the final error after all retries exhausted
+        if isinstance(last_error, httpx.HTTPStatusError):
             error_body = ""
             try:
-                error_body = e.response.text
+                error_body = last_error.response.text
             except Exception:
                 pass
+            # Sanitize error body to prevent API key leakage
+            sanitized_body = sanitize_error(error_body)
             return AnalysisResult(
                 summary="",
                 success=False,
-                error=f"HTTP error from Perplexity API: {e.response.status_code} - {error_body}",
-                raw_response=str(e),
+                error=f"HTTP error from Perplexity API after {self.retry_max_attempts} attempts: "
+                      f"{last_error.response.status_code} - {sanitized_body}",
+                raw_response=sanitize_error(str(last_error)),
             )
-        except httpx.TimeoutException:
+        elif isinstance(last_error, httpx.TimeoutException):
             return AnalysisResult(
                 summary="",
                 success=False,
-                error=f"Request to Perplexity API timed out after {self.timeout}s",
+                error=f"Request to Perplexity API timed out after {self.retry_max_attempts} attempts "
+                      f"(timeout: {self.timeout}s)",
             )
-        except Exception as e:
+        else:
             return AnalysisResult(
                 summary="",
                 success=False,
-                error=f"Unexpected error calling Perplexity API: {e}",
+                error=sanitize_error(f"Error calling Perplexity API after {self.retry_max_attempts} attempts: {last_error}"),
             )
 
-    def _parse_response(self, content: str) -> AnalysisResult:
+    def _parse_response(self, content: str, strict_mode: bool = True) -> AnalysisResult:
         """Parse the LLM response into structured result.
 
-        Uses multiple extraction strategies for robustness.
+        Uses the shared extract_json_from_response() function with optional
+        schema validation in strict mode.
 
         Args:
             content: Raw response content from the LLM.
+            strict_mode: If True, return failure for invalid JSON/schema.
+                        If False, fall back to text parsing.
 
         Returns:
             Parsed AnalysisResult.
         """
-        json_str = None
+        # Use the shared JSON extraction function
+        data, extract_error = extract_json_from_response(content)
 
-        # Strategy 1: Look for ```json ... ``` block
-        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
-        if json_match:
-            json_str = json_match.group(1).strip()
-            logger.debug("Found JSON in code block")
-
-        # Strategy 2: Look for raw JSON object (first { to last })
-        if not json_str:
-            brace_match = re.search(r'(\{[\s\S]*\})', content)
-            if brace_match:
-                json_str = brace_match.group(1)
-                logger.debug("Found JSON by brace matching")
-
-        if json_str:
-            try:
-                # Clean up common JSON issues
-                json_str = re.sub(r',\s*}', '}', json_str)  # trailing commas before }
-                json_str = re.sub(r',\s*]', ']', json_str)  # trailing commas before ]
-
-                data = json.loads(json_str)
+        if data is None:
+            if strict_mode:
+                logger.warning(f"JSON extraction failed: {extract_error}")
                 return AnalysisResult(
-                    summary=data.get("summary", ""),
-                    recommendations=data.get("recommendations", []),
-                    tasks=self._normalize_tasks(data.get("tasks", [])),
+                    summary="",
+                    success=False,
+                    error=f"JSON extraction failed: {extract_error}",
                     raw_response=content,
-                    success=True,
                 )
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON parse failed: {e}")
+            else:
+                # Legacy fallback behavior
+                logger.debug("Using fallback text parsing")
+                return self._create_fallback_result(content)
 
-        # Fallback: Create structured result from raw text
-        logger.debug("Using fallback text parsing")
-        return self._create_fallback_result(content)
+        # Validate the response schema
+        is_valid, validation_error = validate_analysis_response(data)
+        if not is_valid:
+            if strict_mode:
+                logger.warning(f"Schema validation failed: {validation_error}")
+                return AnalysisResult(
+                    summary="",
+                    success=False,
+                    error=f"Schema validation failed: {validation_error}",
+                    raw_response=content,
+                )
+            # In non-strict mode, continue with partial data
+
+        return AnalysisResult(
+            summary=data.get("summary", ""),
+            recommendations=data.get("recommendations", []),
+            tasks=self._normalize_tasks(data.get("tasks", [])),
+            raw_response=content,
+            success=True,
+        )
 
     def _normalize_tasks(self, tasks: list) -> list[dict[str, Any]]:
         """Ensure tasks have required fields.
@@ -366,6 +618,9 @@ def create_analysis_engine(
     api_key: Optional[str] = None,
     mock_mode: bool = False,
     timeout: int = 120,
+    retry_max_attempts: int = 3,
+    retry_backoff_base: float = 2.0,
+    retry_backoff_max: float = 60.0,
 ) -> AnalysisEngine:
     """Factory function to create the appropriate analysis engine.
 
@@ -373,6 +628,9 @@ def create_analysis_engine(
         api_key: Perplexity API key (required if not mock mode).
         mock_mode: If True, return a mock engine.
         timeout: Request timeout in seconds.
+        retry_max_attempts: Maximum number of retry attempts for transient errors.
+        retry_backoff_base: Base seconds for exponential backoff.
+        retry_backoff_max: Maximum backoff time in seconds.
 
     Returns:
         AnalysisEngine instance.
@@ -386,4 +644,10 @@ def create_analysis_engine(
     if not api_key:
         raise ValueError("API key is required when not in mock mode")
 
-    return PerplexityAnalysisEngine(api_key=api_key, timeout=timeout)
+    return PerplexityAnalysisEngine(
+        api_key=api_key,
+        timeout=timeout,
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_base=retry_backoff_base,
+        retry_backoff_max=retry_backoff_max,
+    )

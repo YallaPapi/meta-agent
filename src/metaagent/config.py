@@ -40,6 +40,12 @@ class Config:
     # Runtime Settings
     log_level: str = "INFO"
     mock_mode: bool = False
+    dry_run: bool = False  # Preview prompts and token estimates without API calls
+
+    # Retry Settings
+    retry_max_attempts: int = 3
+    retry_backoff_base: float = 2.0  # Base seconds for exponential backoff
+    retry_backoff_max: float = 60.0  # Maximum backoff in seconds
 
     @classmethod
     def from_env(cls, repo_path: Optional[Path] = None) -> Config:
@@ -71,6 +77,9 @@ class Config:
             auto_push=os.getenv("METAAGENT_AUTO_PUSH", "").lower() in ("true", "1", "yes"),
             log_level=os.getenv("METAAGENT_LOG_LEVEL", "INFO"),
             mock_mode=os.getenv("METAAGENT_MOCK_MODE", "").lower() in ("true", "1", "yes"),
+            retry_max_attempts=int(os.getenv("METAAGENT_RETRY_MAX_ATTEMPTS", "3")),
+            retry_backoff_base=float(os.getenv("METAAGENT_RETRY_BACKOFF_BASE", "2.0")),
+            retry_backoff_max=float(os.getenv("METAAGENT_RETRY_BACKOFF_MAX", "60.0")),
         )
 
     def validate(self) -> list[str]:
@@ -81,7 +90,8 @@ class Config:
         """
         errors = []
 
-        if not self.mock_mode and not self.perplexity_api_key:
+        # API key not required in mock or dry-run mode
+        if not self.mock_mode and not self.dry_run and not self.perplexity_api_key:
             errors.append("PERPLEXITY_API_KEY is required when not in mock mode")
 
         if not self.repo_path.exists():

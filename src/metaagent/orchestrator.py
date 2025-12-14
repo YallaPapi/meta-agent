@@ -1,4 +1,16 @@
-"""Orchestrator for the meta-agent refinement pipeline."""
+"""Orchestrator for the meta-agent refinement pipeline.
+
+This module provides the main orchestration logic for running analysis
+pipelines on codebases. It supports two modes:
+
+1. Profile-based (default): Deterministic execution of stages defined in profiles.yaml
+2. Iterative triage: AI decides which prompts to run each iteration
+
+The orchestrator coordinates several subsystems:
+- StageRunner: Executes individual analysis stages
+- TriageEngine: AI-driven prompt selection (for iterative mode)
+- ImplementationExecutor: Handles Claude Code integration and commits
+"""
 
 from __future__ import annotations
 
@@ -8,15 +20,21 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol
 
-from .analysis import AnalysisEngine, AnalysisResult, create_analysis_engine
+from .analysis import (
+    AnalysisEngine,
+    AnalysisResult,
+    create_analysis_engine,
+    extract_json_from_response,
+)
 from .claude_runner import ClaudeCodeRunner, ClaudeCodeResult, MockClaudeCodeRunner
 from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
 from .plan_writer import PlanWriter, StageResult
-from .prompts import PromptLibrary
+from .prompts import Prompt, PromptLibrary
 from .repomix import RepomixRunner, RepomixResult
+from .tokens import estimate_tokens, format_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +92,17 @@ class IterationResult:
 
 
 @dataclass
+class PlannedCall:
+    """Represents a planned LLM call for dry-run mode."""
+
+    stage: str
+    prompt_id: str
+    profile: str
+    rendered_prompt: str
+    estimated_tokens: int
+
+
+@dataclass
 class RefinementResult:
     """Result from a complete refinement run."""
 
@@ -85,6 +114,709 @@ class RefinementResult:
     error: Optional[str] = None
     stage_results: list[StageResult] = field(default_factory=list)
     iterations: list[IterationResult] = field(default_factory=list)
+    planned_calls: list[PlannedCall] = field(default_factory=list)  # For dry-run mode
+    partial_success: bool = False  # True when some stages succeeded but not all
+
+    @property
+    def status(self) -> str:
+        """Get human-readable status.
+
+        Returns:
+            'success', 'partial_success', or 'failure'
+        """
+        if self.success:
+            return "success"
+        elif self.partial_success:
+            return "partial_success"
+        else:
+            return "failure"
+
+
+# =============================================================================
+# Helper Classes for Separation of Concerns
+# =============================================================================
+
+
+class StageRunner:
+    """Executes individual analysis stages.
+
+    Responsible for:
+    - Rendering prompts with context
+    - Calling the analysis engine
+    - Recording results in history
+    """
+
+    def __init__(
+        self,
+        analysis_engine: AnalysisEngine,
+        prompt_library: PromptLibrary,
+    ):
+        """Initialize the stage runner.
+
+        Args:
+            analysis_engine: Engine for running LLM analysis.
+            prompt_library: Library of available prompts.
+        """
+        self.analysis_engine = analysis_engine
+        self.prompt_library = prompt_library
+
+    def run_stage(
+        self,
+        prompt: Prompt,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> tuple[StageResult, bool]:
+        """Execute a single analysis stage.
+
+        Args:
+            prompt: The prompt to run.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            Tuple of (StageResult, success_bool).
+        """
+        logger.info(f"Running stage: {prompt.id}")
+
+        # Render prompt with context
+        rendered_prompt = prompt.render(
+            prd=prd_content,
+            code_context=code_context,
+            history=history.format_for_prompt(),
+            current_stage=prompt.id,
+        )
+
+        # Run analysis
+        analysis_result = self.analysis_engine.analyze(rendered_prompt)
+
+        if analysis_result.success:
+            history.add_entry(prompt.id, analysis_result.summary)
+            stage_result = StageResult(
+                stage_id=prompt.id,
+                stage_name=prompt.goal or prompt.id,
+                summary=analysis_result.summary,
+                recommendations=analysis_result.recommendations,
+                tasks=analysis_result.tasks,
+            )
+            logger.info(f"Stage {prompt.id} completed successfully")
+            return stage_result, True
+        else:
+            stage_result = StageResult(
+                stage_id=prompt.id,
+                stage_name=prompt.goal or prompt.id,
+                summary=f"Stage failed: {analysis_result.error}",
+                recommendations=[],
+                tasks=[],
+            )
+            logger.error(f"Stage {prompt.id} failed: {analysis_result.error}")
+            return stage_result, False
+
+    def run_stages(
+        self,
+        prompts: list[Prompt],
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> tuple[list[StageResult], int, int]:
+        """Execute multiple stages in order.
+
+        Args:
+            prompts: List of prompts to run.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            Tuple of (stage_results, completed_count, failed_count).
+        """
+        stage_results: list[StageResult] = []
+        completed = 0
+        failed = 0
+
+        for prompt in prompts:
+            result, success = self.run_stage(prompt, prd_content, code_context, history)
+            stage_results.append(result)
+            if success:
+                completed += 1
+            else:
+                failed += 1
+
+        return stage_results, completed, failed
+
+    def preview_stage(
+        self,
+        prompt: Prompt,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+        profile_name: str,
+    ) -> PlannedCall:
+        """Preview a stage for dry-run mode (no actual API call).
+
+        Args:
+            prompt: The prompt to preview.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+            profile_name: Name of the profile being used.
+
+        Returns:
+            PlannedCall with rendered prompt and token estimate.
+        """
+        logger.info(f"[DRY-RUN] Previewing stage: {prompt.id}")
+
+        # Render prompt with context
+        rendered_prompt = prompt.render(
+            prd=prd_content,
+            code_context=code_context,
+            history=history.format_for_prompt(),
+            current_stage=prompt.id,
+        )
+
+        # Estimate tokens
+        tokens = estimate_tokens(rendered_prompt)
+
+        return PlannedCall(
+            stage=prompt.stage,
+            prompt_id=prompt.id,
+            profile=profile_name,
+            rendered_prompt=rendered_prompt,
+            estimated_tokens=tokens,
+        )
+
+    def preview_stages(
+        self,
+        prompts: list[Prompt],
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+        profile_name: str,
+    ) -> list[PlannedCall]:
+        """Preview multiple stages for dry-run mode.
+
+        Args:
+            prompts: List of prompts to preview.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+            profile_name: Name of the profile.
+
+        Returns:
+            List of PlannedCall objects.
+        """
+        planned_calls = []
+        for prompt in prompts:
+            call = self.preview_stage(prompt, prd_content, code_context, history, profile_name)
+            planned_calls.append(call)
+        return planned_calls
+
+
+class TriageEngine:
+    """AI-driven prompt selection for iterative mode.
+
+    Responsible for:
+    - Running the meta_triage prompt
+    - Parsing triage responses
+    - Validating selected prompts
+    """
+
+    def __init__(
+        self,
+        analysis_engine: AnalysisEngine,
+        prompt_library: PromptLibrary,
+        max_prompts_per_iteration: int = 3,
+    ):
+        """Initialize the triage engine.
+
+        Args:
+            analysis_engine: Engine for running LLM analysis.
+            prompt_library: Library of available prompts.
+            max_prompts_per_iteration: Maximum prompts to run per iteration.
+        """
+        self.analysis_engine = analysis_engine
+        self.prompt_library = prompt_library
+        self.max_prompts_per_iteration = max_prompts_per_iteration
+
+    def run_triage(
+        self,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> TriageResult:
+        """Run triage to determine which prompts to run next.
+
+        Args:
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            TriageResult with selected prompts or done flag.
+        """
+        triage_prompt = self.prompt_library.get_prompt("meta_triage")
+        if not triage_prompt:
+            return TriageResult(
+                success=False,
+                error="Triage prompt (meta_triage) not found in prompt library",
+            )
+
+        rendered_prompt = triage_prompt.render(
+            prd=prd_content,
+            code_context=code_context,
+            history=history.format_for_prompt(),
+        )
+
+        analysis_result = self.analysis_engine.analyze(rendered_prompt)
+
+        if not analysis_result.success:
+            return TriageResult(success=False, error=analysis_result.error)
+
+        return self._parse_triage_response(analysis_result)
+
+    def _parse_triage_response(self, analysis_result: AnalysisResult) -> TriageResult:
+        """Parse the triage response into a TriageResult.
+
+        Uses the shared extract_json_from_response() function for robust
+        JSON extraction with proper handling of nested braces and strings.
+
+        Args:
+            analysis_result: Raw analysis result from the LLM.
+
+        Returns:
+            Parsed TriageResult.
+        """
+        # Use raw_response if summary is empty
+        response_text = analysis_result.summary
+        if not response_text or not response_text.strip():
+            response_text = analysis_result.raw_response
+
+        if not response_text:
+            return TriageResult(
+                success=False,
+                error="Empty triage response",
+            )
+
+        logger.debug(f"Triage response (first 500 chars): {response_text[:500]}")
+
+        # Use shared JSON extraction function for robust parsing
+        data, extract_error = extract_json_from_response(response_text)
+
+        if data is None:
+            # No JSON found, check for "done" indicator in text
+            if "done" in response_text.lower() and "no further" in response_text.lower():
+                return TriageResult(
+                    success=True,
+                    done=True,
+                    assessment=response_text,
+                )
+
+            logger.warning(f"Triage JSON extraction failed: {extract_error}")
+            return TriageResult(
+                success=False,
+                error=f"Could not parse triage response: {extract_error}. Response: {response_text[:200]}",
+            )
+
+        # Validate triage-specific fields
+        validation_error = self._validate_triage_data(data)
+        if validation_error:
+            logger.warning(f"Triage validation failed: {validation_error}")
+            return TriageResult(
+                success=False,
+                error=f"Invalid triage response: {validation_error}",
+            )
+
+        selected_prompts = self._validate_prompts(data.get("selected_prompts", []))
+
+        return TriageResult(
+            success=True,
+            done=data.get("done", False),
+            assessment=data.get("assessment", ""),
+            priority_issues=data.get("priority_issues", []),
+            selected_prompts=selected_prompts,
+            reasoning=data.get("reasoning", ""),
+        )
+
+    def _validate_triage_data(self, data: dict) -> Optional[str]:
+        """Validate triage response data structure.
+
+        Args:
+            data: Parsed JSON data from triage response.
+
+        Returns:
+            Error message if invalid, None if valid.
+        """
+        if not isinstance(data, dict):
+            return "Response is not a JSON object"
+
+        # Check 'done' is a boolean if present
+        if "done" in data and not isinstance(data["done"], bool):
+            return "'done' field must be a boolean"
+
+        # Check 'selected_prompts' is a list if present
+        if "selected_prompts" in data:
+            if not isinstance(data["selected_prompts"], list):
+                return "'selected_prompts' must be a list"
+            for item in data["selected_prompts"]:
+                if not isinstance(item, str):
+                    return "'selected_prompts' must contain only strings"
+
+        # Check 'priority_issues' is a list if present
+        if "priority_issues" in data and not isinstance(data["priority_issues"], list):
+            return "'priority_issues' must be a list"
+
+        return None
+
+    def _validate_prompts(self, prompt_ids: list[str]) -> list[str]:
+        """Validate and filter selected prompts.
+
+        Args:
+            prompt_ids: List of prompt IDs from triage.
+
+        Returns:
+            Validated list of prompt IDs that exist in the library.
+        """
+        validated = []
+        for prompt_id in prompt_ids:
+            if self.prompt_library.get_prompt(prompt_id):
+                validated.append(prompt_id)
+            else:
+                logger.warning(f"Triage selected unknown prompt: {prompt_id}")
+
+        # Limit to max prompts per iteration
+        if len(validated) > self.max_prompts_per_iteration:
+            logger.warning(
+                f"Triage selected {len(validated)} prompts, limiting to {self.max_prompts_per_iteration}"
+            )
+            validated = validated[:self.max_prompts_per_iteration]
+
+        return validated
+
+
+class ImplementationExecutor:
+    """Handles Claude Code integration and git commits.
+
+    Responsible for:
+    - Writing task files for Claude Code
+    - Invoking Claude Code (when auto_implement is enabled)
+    - Committing changes to git
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        claude_runner: ClaudeCodeRunner,
+    ):
+        """Initialize the implementation executor.
+
+        Args:
+            config: Configuration settings.
+            claude_runner: Claude Code runner instance.
+        """
+        self.config = config
+        self.claude_runner = claude_runner
+
+    def execute(self, stage_results: list[StageResult]) -> bool:
+        """Execute implementation for stage results.
+
+        Args:
+            stage_results: Results from analysis stages.
+
+        Returns:
+            True if changes were made, False otherwise.
+        """
+        if not stage_results:
+            return False
+
+        # Collect all tasks
+        tasks = []
+        for result in stage_results:
+            tasks.extend(result.tasks)
+
+        if not tasks:
+            logger.info("No tasks to implement")
+            return False
+
+        # Write tasks to file
+        prompt_file = self._write_task_file(tasks)
+        logger.info(f"Implementation tasks written to: {prompt_file}")
+
+        # Build implementation prompt
+        implementation_prompt = self._build_prompt(tasks)
+
+        # Execute with Claude Code if enabled
+        if self.config.auto_implement:
+            return self._run_claude_code(implementation_prompt)
+        else:
+            logger.info("Please run Claude Code to implement these changes.")
+            logger.info("Or use --auto-implement to run Claude Code automatically.")
+            return True  # Tasks were written
+
+    def _write_task_file(self, tasks: list) -> Path:
+        """Write tasks to a markdown file for Claude Code.
+
+        Generates a well-structured task file with:
+        - Claude Code instruction header
+        - Tasks sorted by priority (critical > high > medium > low)
+        - Checkboxes for tracking progress
+        - File paths for context
+
+        Args:
+            tasks: List of task dictionaries.
+
+        Returns:
+            Path to the written file.
+        """
+        prompt_file = self.config.repo_path / ".meta-agent-tasks.md"
+
+        # Sort tasks by priority
+        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        sorted_tasks = sorted(
+            tasks,
+            key=lambda t: priority_order.get(
+                t.get("priority", "medium").lower() if isinstance(t, dict) else "medium",
+                2
+            )
+        )
+
+        lines = [
+            "# Meta-Agent Implementation Tasks",
+            "",
+            "## Instructions for Claude Code",
+            "",
+            "This file contains implementation tasks identified by meta-agent analysis.",
+            "Please work through these tasks in order, checking each box when complete.",
+            "",
+            "### How to use this file:",
+            "1. Read through all tasks to understand the scope",
+            "2. Start with critical/high priority tasks first",
+            "3. Check the file path for context on where to make changes",
+            "4. Mark tasks complete by changing `[ ]` to `[x]`",
+            "5. Commit changes after completing related tasks",
+            "",
+            "---",
+            "",
+            "## Task Summary",
+            "",
+        ]
+
+        # Add summary by priority
+        critical = sum(1 for t in sorted_tasks if isinstance(t, dict) and t.get("priority", "").lower() == "critical")
+        high = sum(1 for t in sorted_tasks if isinstance(t, dict) and t.get("priority", "").lower() == "high")
+        medium = sum(1 for t in sorted_tasks if isinstance(t, dict) and t.get("priority", "").lower() == "medium")
+        low = sum(1 for t in sorted_tasks if isinstance(t, dict) and t.get("priority", "").lower() == "low")
+
+        if critical:
+            lines.append(f"- **Critical:** {critical} task(s)")
+        if high:
+            lines.append(f"- **High:** {high} task(s)")
+        if medium:
+            lines.append(f"- **Medium:** {medium} task(s)")
+        if low:
+            lines.append(f"- **Low:** {low} task(s)")
+        lines.append(f"- **Total:** {len(sorted_tasks)} task(s)")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append("## Tasks")
+        lines.append("")
+
+        for i, task in enumerate(sorted_tasks, 1):
+            if isinstance(task, dict):
+                title = task.get("title", "Untitled task")
+                desc = task.get("description", str(task))
+                priority = task.get("priority", "medium").lower()
+                file_ref = task.get("file", "")
+
+                # Priority emoji
+                priority_emoji = {
+                    "critical": "🔴",
+                    "high": "🟠",
+                    "medium": "🟡",
+                    "low": "🟢",
+                }.get(priority, "⚪")
+
+                lines.append(f"### {i}. {priority_emoji} {title}")
+                lines.append("")
+                lines.append(f"- [ ] **Status:** Not started")
+                lines.append(f"- **Priority:** {priority.title()}")
+                if file_ref:
+                    lines.append(f"- **File:** `{file_ref}`")
+                lines.append("")
+                lines.append("**Description:**")
+                lines.append("")
+                lines.append(desc)
+                lines.append("")
+            else:
+                lines.append(f"### {i}. {task}")
+                lines.append("")
+                lines.append(f"- [ ] **Status:** Not started")
+                lines.append("")
+
+        prompt_file.write_text("\n".join(lines), encoding="utf-8")
+        return prompt_file
+
+    def _build_prompt(self, tasks: list) -> str:
+        """Build a prompt string for Claude Code.
+
+        Args:
+            tasks: List of task dictionaries.
+
+        Returns:
+            Formatted prompt string.
+        """
+        prompt = "Please implement the following improvements:\n\n"
+
+        for i, task in enumerate(tasks, 1):
+            if isinstance(task, dict):
+                title = task.get("title", "")
+                desc = task.get("description", str(task))
+                file_ref = task.get("file", "")
+
+                if title:
+                    prompt += f"{i}. **{title}**"
+                    if file_ref:
+                        prompt += f" ({file_ref})"
+                    prompt += f"\n   {desc}\n\n"
+                else:
+                    prompt += f"{i}. {desc}\n\n"
+            else:
+                prompt += f"{i}. {task}\n\n"
+
+        return prompt
+
+    def _run_claude_code(self, prompt: str) -> bool:
+        """Run Claude Code to implement changes.
+
+        Args:
+            prompt: Implementation prompt.
+
+        Returns:
+            True if changes were made, False otherwise.
+        """
+        logger.info("Auto-implementing with Claude Code...")
+
+        result = self.claude_runner.implement(
+            repo_path=self.config.repo_path,
+            prompt=prompt,
+            plan_file=self.config.repo_path / "docs" / "mvp_improvement_plan.md",
+        )
+
+        if result.success:
+            logger.info(f"Claude Code completed. Files modified: {len(result.files_modified)}")
+            for f in result.files_modified:
+                logger.debug(f"  Modified: {f}")
+            return len(result.files_modified) > 0
+        else:
+            logger.error(f"Claude Code failed: {result.error}")
+            return False
+
+    def commit_changes(
+        self,
+        message: str,
+        prompt_ids: Optional[list[str]] = None,
+    ) -> Optional[str]:
+        """Commit changes to git.
+
+        Args:
+            message: Commit message.
+            prompt_ids: Optional list of prompt IDs to reference.
+
+        Returns:
+            Commit hash if successful, None otherwise.
+        """
+        if not self.config.auto_commit:
+            logger.info("Auto-commit disabled, skipping commit")
+            return None
+
+        try:
+            # Check for changes
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+            if not status_result.stdout.strip():
+                logger.info("No changes to commit")
+                return None
+
+            # Stage all changes
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=self.config.repo_path,
+                check=True,
+            )
+
+            # Build commit message
+            commit_message = self._build_commit_message(message, prompt_ids)
+            subprocess.run(
+                ["git", "commit", "-m", commit_message],
+                cwd=self.config.repo_path,
+                check=True,
+            )
+
+            # Get commit hash
+            hash_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.config.repo_path,
+                capture_output=True,
+                text=True,
+            )
+
+            commit_hash = hash_result.stdout.strip()[:8]
+            logger.info(f"Committed changes: {commit_hash}")
+
+            # Push if enabled
+            if self.config.auto_push:
+                self._push_changes()
+
+            return commit_hash
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Git operation failed: {e}")
+            return None
+
+    def _build_commit_message(
+        self,
+        message: str,
+        prompt_ids: Optional[list[str]] = None,
+    ) -> str:
+        """Build a formatted commit message.
+
+        Args:
+            message: Base message.
+            prompt_ids: Optional list of prompt IDs.
+
+        Returns:
+            Formatted commit message.
+        """
+        lines = [f"meta-agent: {message}"]
+
+        if prompt_ids:
+            lines.append("")
+            lines.append(f"Prompts: {', '.join(prompt_ids)}")
+
+        lines.append("")
+        lines.append("Generated with meta-agent")
+
+        return "\n".join(lines)
+
+    def _push_changes(self) -> None:
+        """Push changes to remote."""
+        try:
+            subprocess.run(
+                ["git", "push"],
+                cwd=self.config.repo_path,
+                check=True,
+                timeout=60,
+            )
+            logger.info("Pushed to remote")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"Failed to push: {e}")
 
 
 class Orchestrator:
@@ -135,6 +867,9 @@ class Orchestrator:
             api_key=config.perplexity_api_key,
             mock_mode=config.mock_mode,
             timeout=config.timeout,
+            retry_max_attempts=config.retry_max_attempts,
+            retry_backoff_base=config.retry_backoff_base,
+            retry_backoff_max=config.retry_backoff_max,
         )
 
         self.plan_writer = plan_writer or PlanWriter(
@@ -157,12 +892,28 @@ class Orchestrator:
                 max_turns=config.claude_code_max_turns,
             )
 
+        # Initialize helper classes for separation of concerns
+        self.stage_runner = StageRunner(
+            analysis_engine=self.analysis_engine,
+            prompt_library=self.prompt_library,
+        )
+
+        self.triage_engine = TriageEngine(
+            analysis_engine=self.analysis_engine,
+            prompt_library=self.prompt_library,
+        )
+
+        self.implementation_executor = ImplementationExecutor(
+            config=self.config,
+            claude_runner=self.claude_runner,
+        )
+
     def refine(self, profile_id: str) -> RefinementResult:
         """Run the refinement pipeline for a profile.
 
-        This runs all prompts defined in the profile sequentially against
-        the TARGET repo (config.repo_path), using prompts from the
-        meta-agent's config directory.
+        This is the default mode - deterministic execution of stages
+        defined in profiles.yaml. Runs all prompts sequentially against
+        the TARGET repo (config.repo_path).
 
         Args:
             profile_id: ID of the profile to use (e.g., 'automation_agent').
@@ -200,57 +951,19 @@ class Orchestrator:
         logger.info("Packing target codebase...")
         code_context = self._pack_codebase()
 
-        # Run stages defined in the profile
-        history = RunHistory()
-        stage_results: list[StageResult] = []
-        stages_completed = 0
-        stages_failed = 0
-
+        # Get prompts for the profile
         prompts = self.prompt_library.get_prompts_for_profile(profile_id)
         if not prompts:
             logger.warning(f"No prompts found for profile: {profile_id}")
 
-        for prompt in prompts:
-            logger.info(f"Running stage: {prompt.id}")
-
-            # Render prompt with context
-            rendered_prompt = prompt.render(
-                prd=prd_content,
-                code_context=code_context,
-                history=history.format_for_prompt(),
-                current_stage=prompt.id,
-            )
-
-            # Run analysis
-            analysis_result = self.analysis_engine.analyze(rendered_prompt)
-
-            if analysis_result.success:
-                stages_completed += 1
-                history.add_entry(prompt.id, analysis_result.summary)
-
-                stage_results.append(
-                    StageResult(
-                        stage_id=prompt.id,
-                        stage_name=prompt.goal or prompt.id,
-                        summary=analysis_result.summary,
-                        recommendations=analysis_result.recommendations,
-                        tasks=analysis_result.tasks,
-                    )
-                )
-                logger.info(f"Stage {prompt.id} completed successfully")
-            else:
-                stages_failed += 1
-                logger.error(f"Stage {prompt.id} failed: {analysis_result.error}")
-
-                stage_results.append(
-                    StageResult(
-                        stage_id=prompt.id,
-                        stage_name=prompt.goal or prompt.id,
-                        summary=f"Stage failed: {analysis_result.error}",
-                        recommendations=[],
-                        tasks=[],
-                    )
-                )
+        # Run all stages using the StageRunner
+        history = RunHistory()
+        stage_results, stages_completed, stages_failed = self.stage_runner.run_stages(
+            prompts=prompts,
+            prd_content=prd_content,
+            code_context=code_context,
+            history=history,
+        )
 
         # Write plan to TARGET repo
         plan_path = None
@@ -270,12 +983,77 @@ class Orchestrator:
             stages_failed=stages_failed,
             plan_path=plan_path,
             stage_results=stage_results,
+            partial_success=stages_failed > 0 and stages_completed > 0,
+        )
+
+    def refine_dry_run(self, profile_id: str) -> RefinementResult:
+        """Preview the refinement pipeline without making API calls.
+
+        This mode shows what prompts would be sent and estimates token usage
+        without actually calling the LLM.
+
+        Args:
+            profile_id: ID of the profile to preview.
+
+        Returns:
+            RefinementResult with planned_calls populated.
+        """
+        logger.info(f"[DRY-RUN] Previewing refinement with profile: {profile_id}")
+        logger.info(f"[DRY-RUN] Target repo: {self.config.repo_path}")
+
+        # Load PRD from TARGET repo
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return RefinementResult(
+                success=False,
+                profile_name=profile_id,
+                stages_completed=0,
+                stages_failed=0,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Get profile from prompt library
+        profile = self.prompt_library.get_profile(profile_id)
+        if not profile:
+            return RefinementResult(
+                success=False,
+                profile_name=profile_id,
+                stages_completed=0,
+                stages_failed=0,
+                error=f"Profile not found: {profile_id}",
+            )
+
+        # Pack the TARGET repo codebase
+        logger.info("[DRY-RUN] Packing target codebase...")
+        code_context = self._pack_codebase()
+
+        # Get prompts for the profile
+        prompts = self.prompt_library.get_prompts_for_profile(profile_id)
+        if not prompts:
+            logger.warning(f"[DRY-RUN] No prompts found for profile: {profile_id}")
+
+        # Preview all stages (no actual API calls)
+        history = RunHistory()
+        planned_calls = self.stage_runner.preview_stages(
+            prompts=prompts,
+            prd_content=prd_content,
+            code_context=code_context,
+            history=history,
+            profile_name=profile.name,
+        )
+
+        return RefinementResult(
+            success=True,
+            profile_name=profile.name,
+            stages_completed=0,  # No stages actually run
+            stages_failed=0,
+            planned_calls=planned_calls,
         )
 
     def refine_iterative(self, max_iterations: int = 10) -> RefinementResult:
         """Run the iterative refinement loop with AI-driven triage.
 
-        This is an alternative mode where the AI decides which prompts to run:
+        This is an optional mode where the AI decides which prompts to run:
         1. Pack codebase
         2. Triage (AI decides which prompts to run)
         3. Run selected prompts
@@ -315,9 +1093,9 @@ class Orchestrator:
             logger.info("Step 1: Packing codebase...")
             code_context = self._pack_codebase()
 
-            # Step 2: Triage
+            # Step 2: Triage using TriageEngine
             logger.info("Step 2: Running triage...")
-            triage_result = self._run_triage(prd_content, code_context, history)
+            triage_result = self.triage_engine.run_triage(prd_content, code_context, history)
 
             if not triage_result.success:
                 logger.error(f"Triage failed: {triage_result.error}")
@@ -338,53 +1116,34 @@ class Orchestrator:
             logger.info(f"Triage selected prompts: {triage_result.selected_prompts}")
             logger.info(f"Assessment: {triage_result.assessment}")
 
-            # Step 3: Run selected prompts
+            # Step 3: Run selected prompts using StageRunner
             logger.info("Step 3: Running selected prompts...")
-            iteration_stage_results = []
+            prompts = [
+                self.prompt_library.get_prompt(pid)
+                for pid in triage_result.selected_prompts
+                if self.prompt_library.get_prompt(pid)
+            ]
 
-            for prompt_id in triage_result.selected_prompts:
-                prompt = self.prompt_library.get_prompt(prompt_id)
-                if not prompt:
-                    logger.warning(f"Prompt not found: {prompt_id}")
-                    continue
+            iteration_results, completed, failed = self.stage_runner.run_stages(
+                prompts=prompts,
+                prd_content=prd_content,
+                code_context=code_context,
+                history=history,
+            )
 
-                logger.info(f"Running prompt: {prompt_id}")
-                rendered_prompt = prompt.render(
-                    prd=prd_content,
-                    code_context=code_context,
-                    history=history.format_for_prompt(),
-                    current_stage=prompt_id,
-                )
-
-                analysis_result = self.analysis_engine.analyze(rendered_prompt)
-
-                if analysis_result.success:
-                    stages_completed += 1
-                    history.add_entry(prompt_id, analysis_result.summary)
-
-                    stage_result = StageResult(
-                        stage_id=prompt_id,
-                        stage_name=prompt.goal or prompt_id,
-                        summary=analysis_result.summary,
-                        recommendations=analysis_result.recommendations,
-                        tasks=analysis_result.tasks,
-                    )
-                    iteration_stage_results.append(stage_result)
-                    all_stage_results.append(stage_result)
-                    logger.info(f"Prompt {prompt_id} completed successfully")
-                else:
-                    stages_failed += 1
-                    logger.error(f"Prompt {prompt_id} failed: {analysis_result.error}")
+            stages_completed += completed
+            stages_failed += failed
+            all_stage_results.extend(iteration_results)
 
             # Step 4: Implement changes with Claude Code
             logger.info("Step 4: Implementing changes with Claude Code...")
-            changes_made = self._implement_with_claude(iteration_stage_results)
+            changes_made = self.implementation_executor.execute(iteration_results)
 
             # Step 5: Commit to GitHub
             commit_hash = None
             if changes_made:
                 logger.info("Step 5: Committing changes to GitHub...")
-                commit_hash = self._commit_changes(
+                commit_hash = self.implementation_executor.commit_changes(
                     f"Iteration {iteration}: improvements from AI analysis",
                     prompt_ids=triage_result.selected_prompts,
                 )
@@ -396,7 +1155,7 @@ class Orchestrator:
                     changes_made=changes_made,
                     committed=commit_hash is not None,
                     commit_hash=commit_hash,
-                    stage_results=iteration_stage_results,
+                    stage_results=iteration_results,
                 )
             )
 
@@ -422,6 +1181,7 @@ class Orchestrator:
             plan_path=plan_path,
             stage_results=all_stage_results,
             iterations=iterations,
+            partial_success=stages_failed > 0 and stages_completed > 0,
         )
 
     def _pack_codebase(self) -> str:
@@ -453,266 +1213,6 @@ class Orchestrator:
                 )
 
         return self._build_code_context(structure_context, file_contents)
-
-    def _run_triage(
-        self, prd_content: str, code_context: str, history: RunHistory
-    ) -> TriageResult:
-        """Run triage to determine which prompts to run next.
-
-        Args:
-            prd_content: The PRD content.
-            code_context: The packed codebase.
-            history: Previous analysis history.
-
-        Returns:
-            TriageResult with selected prompts or done flag.
-        """
-        triage_prompt = self.prompt_library.get_prompt("meta_triage")
-        if not triage_prompt:
-            return TriageResult(
-                success=False,
-                error="Triage prompt (meta_triage) not found in prompt library",
-            )
-
-        rendered_prompt = triage_prompt.render(
-            prd=prd_content,
-            code_context=code_context,
-            history=history.format_for_prompt(),
-        )
-
-        analysis_result = self.analysis_engine.analyze(rendered_prompt)
-
-        if not analysis_result.success:
-            return TriageResult(success=False, error=analysis_result.error)
-
-        # Parse the triage response
-        try:
-            # Try to extract JSON from the response
-            # Use raw_response if summary is empty (happens when API returns JSON
-            # with different keys than the standard analysis format)
-            response_text = analysis_result.summary
-            if not response_text or not response_text.strip():
-                response_text = analysis_result.raw_response
-
-            logger.debug(f"Triage raw response length: {len(analysis_result.raw_response) if analysis_result.raw_response else 0}")
-            logger.debug(f"Triage response text (first 500 chars): {response_text[:500] if response_text else 'Empty'}")
-
-            # Look for JSON in the response
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-
-            if json_start != -1 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                data = json.loads(json_str)
-
-                selected_prompts = data.get("selected_prompts", [])
-
-                # Validate and filter selected prompts
-                validated_prompts = []
-                for prompt_id in selected_prompts:
-                    if self.prompt_library.get_prompt(prompt_id):
-                        validated_prompts.append(prompt_id)
-                    else:
-                        logger.warning(f"Triage selected unknown prompt: {prompt_id}")
-
-                # Limit to max 3 prompts per iteration
-                if len(validated_prompts) > 3:
-                    logger.warning(
-                        f"Triage selected {len(validated_prompts)} prompts, limiting to 3"
-                    )
-                    validated_prompts = validated_prompts[:3]
-
-                return TriageResult(
-                    success=True,
-                    done=data.get("done", False),
-                    assessment=data.get("assessment", ""),
-                    priority_issues=data.get("priority_issues", []),
-                    selected_prompts=validated_prompts,
-                    reasoning=data.get("reasoning", ""),
-                )
-            else:
-                # No JSON found, try to parse as plain text
-                # If response contains "done" or similar, mark as done
-                if "done" in response_text.lower() and "no further" in response_text.lower():
-                    return TriageResult(
-                        success=True,
-                        done=True,
-                        assessment=response_text,
-                    )
-
-                return TriageResult(
-                    success=False,
-                    error=f"Could not parse triage response: {response_text[:200]}",
-                )
-
-        except json.JSONDecodeError as e:
-            return TriageResult(
-                success=False,
-                error=f"Failed to parse triage JSON: {e}",
-            )
-
-    def _implement_with_claude(self, stage_results: list[StageResult]) -> bool:
-        """Implement changes using Claude Code.
-
-        Args:
-            stage_results: Results from the analysis stage.
-
-        Returns:
-            True if changes were made, False otherwise.
-        """
-        if not stage_results:
-            return False
-
-        # Build implementation prompt for Claude Code
-        tasks = []
-        for result in stage_results:
-            for task in result.tasks:
-                tasks.append(task)
-
-        if not tasks:
-            logger.info("No tasks to implement")
-            return False
-
-        # Create a prompt for Claude Code
-        implementation_prompt = "Please implement the following improvements:\n\n"
-        for i, task in enumerate(tasks, 1):
-            if isinstance(task, dict):
-                title = task.get("title", "")
-                desc = task.get("description", str(task))
-                file_ref = task.get("file", "")
-                if title:
-                    implementation_prompt += f"{i}. **{title}**"
-                    if file_ref:
-                        implementation_prompt += f" ({file_ref})"
-                    implementation_prompt += f"\n   {desc}\n\n"
-                else:
-                    implementation_prompt += f"{i}. {desc}\n\n"
-            else:
-                implementation_prompt += f"{i}. {task}\n\n"
-
-        # Write the prompt to a file for Claude Code to read
-        prompt_file = self.config.repo_path / ".meta-agent-tasks.md"
-        prompt_file.write_text(implementation_prompt, encoding="utf-8")
-
-        logger.info(f"Implementation tasks written to: {prompt_file}")
-
-        # If auto_implement is enabled, invoke Claude Code
-        if self.config.auto_implement:
-            logger.info("Auto-implementing with Claude Code...")
-
-            result = self.claude_runner.implement(
-                repo_path=self.config.repo_path,
-                prompt=implementation_prompt,
-                plan_file=self.config.repo_path / "docs" / "mvp_improvement_plan.md",
-            )
-
-            if result.success:
-                logger.info(f"Claude Code completed. Files modified: {len(result.files_modified)}")
-                for f in result.files_modified:
-                    logger.debug(f"  Modified: {f}")
-                return len(result.files_modified) > 0
-            else:
-                logger.error(f"Claude Code failed: {result.error}")
-                return False
-        else:
-            logger.info("Please run Claude Code to implement these changes.")
-            logger.info("Or use --auto-implement to run Claude Code automatically.")
-            # Return True to indicate tasks were written (even if not auto-implemented)
-            return True
-
-    def _commit_changes(self, message: str, prompt_ids: Optional[list[str]] = None) -> Optional[str]:
-        """Commit changes to git.
-
-        Args:
-            message: Commit message.
-            prompt_ids: Optional list of prompt IDs to reference in commit.
-
-        Returns:
-            Commit hash if successful, None otherwise.
-        """
-        # Check if auto-commit is disabled
-        if not self.config.auto_commit:
-            logger.info("Auto-commit disabled, skipping commit")
-            return None
-
-        try:
-            # Check if there are changes to commit
-            status_result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self.config.repo_path,
-                capture_output=True,
-                text=True,
-            )
-
-            if not status_result.stdout.strip():
-                logger.info("No changes to commit")
-                return None
-
-            # Stage all changes
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=self.config.repo_path,
-                check=True,
-            )
-
-            # Build commit message with prompt references
-            commit_message = self._build_commit_message(message, prompt_ids)
-            subprocess.run(
-                ["git", "commit", "-m", commit_message],
-                cwd=self.config.repo_path,
-                check=True,
-            )
-
-            # Get commit hash
-            hash_result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.config.repo_path,
-                capture_output=True,
-                text=True,
-            )
-
-            commit_hash = hash_result.stdout.strip()[:8]
-            logger.info(f"Committed changes: {commit_hash}")
-
-            # Only push if auto_push is enabled
-            if self.config.auto_push:
-                try:
-                    subprocess.run(
-                        ["git", "push"],
-                        cwd=self.config.repo_path,
-                        check=True,
-                        timeout=60,
-                    )
-                    logger.info("Pushed to remote")
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                    logger.warning(f"Failed to push: {e}")
-
-            return commit_hash
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git operation failed: {e}")
-            return None
-
-    def _build_commit_message(self, message: str, prompt_ids: Optional[list[str]] = None) -> str:
-        """Build a commit message with prompt references.
-
-        Args:
-            message: Base message.
-            prompt_ids: Optional list of prompt IDs.
-
-        Returns:
-            Formatted commit message.
-        """
-        lines = [f"meta-agent: {message}"]
-
-        if prompt_ids:
-            lines.append("")
-            lines.append(f"Prompts: {', '.join(prompt_ids)}")
-
-        lines.append("")
-        lines.append("Generated with meta-agent")
-
-        return "\n".join(lines)
 
     def _load_prd(self) -> Optional[str]:
         """Load the PRD file content.

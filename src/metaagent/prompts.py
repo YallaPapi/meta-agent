@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from jinja2 import Template, UndefinedError
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,15 @@ class Prompt:
     ) -> str:
         """Render the prompt template with variables.
 
-        Builds the prompt in the correct order:
-        1. Context sections (PRD, codebase, history) - so LLM knows what it's analyzing
-        2. The analysis prompt/instructions
-        3. JSON schema (for markdown prompts without built-in schema)
+        For YAML prompts (source='yaml'):
+            Uses Jinja2 to interpolate {{ prd }}, {{ code_context }}, etc.
+            These prompts have their own structure with placeholders.
+
+        For Markdown prompts (source='markdown'):
+            Builds the prompt in the correct order:
+            1. Context sections (PRD, codebase, history)
+            2. The analysis prompt/instructions
+            3. JSON schema (if prompt doesn't have built-in schema)
 
         Args:
             prd: The PRD content.
@@ -111,6 +117,62 @@ class Prompt:
             f"has_json_schema={self.has_json_schema})"
         )
 
+        # YAML prompts use Jinja2 template interpolation
+        if self.source == 'yaml':
+            return self._render_yaml_prompt(prd, code_context, history, current_stage)
+
+        # Markdown prompts use structured context prepending
+        return self._render_markdown_prompt(prd, code_context, history, current_stage)
+
+    def _render_yaml_prompt(
+        self,
+        prd: str = "",
+        code_context: str = "",
+        history: str = "",
+        current_stage: str = "",
+    ) -> str:
+        """Render a YAML prompt using Jinja2 interpolation.
+
+        Args:
+            prd: The PRD content.
+            code_context: The packed codebase content.
+            history: Previous analysis summaries.
+            current_stage: Current stage name.
+
+        Returns:
+            Rendered prompt string with variables interpolated.
+        """
+        try:
+            template = Template(self.template)
+            return template.render(
+                prd=prd,
+                code_context=code_context,
+                history=history,
+                current_stage=current_stage,
+            )
+        except UndefinedError as e:
+            logger.warning(f"Jinja2 template error in prompt '{self.id}': {e}")
+            # Fallback to raw template if rendering fails
+            return self.template
+
+    def _render_markdown_prompt(
+        self,
+        prd: str = "",
+        code_context: str = "",
+        history: str = "",
+        current_stage: str = "",
+    ) -> str:
+        """Render a markdown prompt by prepending context sections.
+
+        Args:
+            prd: The PRD content.
+            code_context: The packed codebase content.
+            history: Previous analysis summaries.
+            current_stage: Current stage name.
+
+        Returns:
+            Rendered prompt string with context prepended.
+        """
         # 1. Build context header (context comes FIRST)
         context_sections = []
         if prd:
@@ -173,29 +235,50 @@ class PromptLibrary:
         if self._loaded:
             return
 
+        logger.info("Loading prompt library...")
         self._load_prompts()
         self._load_profiles()
         self._loaded = True
+
+        # Log summary of loaded content
+        prompt_count = len(self._prompts)
+        profile_count = len(self._profiles)
+        logger.info(
+            f"Prompt library loaded: {prompt_count} prompts, {profile_count} profiles"
+        )
 
     def _load_prompts(self) -> None:
         """Load prompts from markdown files and optional YAML."""
         # Load from markdown prompt library (primary source)
         if self.prompt_library_path and self.prompt_library_path.exists():
+            logger.debug(f"Loading markdown prompts from: {self.prompt_library_path}")
             self._load_markdown_prompts()
+        else:
+            logger.debug(f"No prompt library found at: {self.prompt_library_path}")
 
         # Also load from YAML if provided (for backwards compatibility)
         if self.prompts_path and self.prompts_path.exists():
+            logger.debug(f"Loading YAML prompts from: {self.prompts_path}")
             self._load_yaml_prompts()
+        else:
+            logger.debug(f"No YAML prompts file at: {self.prompts_path}")
 
     def _load_markdown_prompts(self) -> None:
         """Load prompts from markdown files in prompt_library directory."""
         if not self.prompt_library_path:
             return
 
+        loaded_count = 0
+        failed_count = 0
         for md_file in self.prompt_library_path.glob("*.md"):
             prompt = self._parse_markdown_prompt(md_file)
             if prompt:
                 self._prompts[prompt.id] = prompt
+                loaded_count += 1
+            else:
+                failed_count += 1
+
+        logger.debug(f"Loaded {loaded_count} markdown prompts ({failed_count} failed)")
 
     def _parse_markdown_prompt(self, file_path: Path) -> Optional[Prompt]:
         """Parse a markdown file into a Prompt object.
@@ -267,37 +350,48 @@ class PromptLibrary:
         if not self.prompts_path:
             return
 
-        with open(self.prompts_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with open(self.prompts_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
 
-        prompts_data = data.get("prompts", {})
-        for prompt_id, prompt_data in prompts_data.items():
-            self._prompts[prompt_id] = Prompt(
-                id=prompt_id,
-                goal=prompt_data.get("goal", ""),
-                template=prompt_data.get("template", ""),
-                stage=prompt_data.get("stage", ""),
-                dependencies=prompt_data.get("dependencies", []),
-                when_to_use=prompt_data.get("when_to_use"),
-                source='yaml',
-                has_json_schema=True,  # YAML prompts have built-in schema
-            )
+            prompts_data = data.get("prompts", {})
+            for prompt_id, prompt_data in prompts_data.items():
+                self._prompts[prompt_id] = Prompt(
+                    id=prompt_id,
+                    goal=prompt_data.get("goal", ""),
+                    template=prompt_data.get("template", ""),
+                    stage=prompt_data.get("stage", ""),
+                    dependencies=prompt_data.get("dependencies", []),
+                    when_to_use=prompt_data.get("when_to_use"),
+                    source='yaml',
+                    has_json_schema=True,  # YAML prompts have built-in schema
+                )
+
+            logger.debug(f"Loaded {len(prompts_data)} YAML prompts")
+        except Exception as e:
+            logger.warning(f"Failed to load YAML prompts from {self.prompts_path}: {e}")
 
     def _load_profiles(self) -> None:
         """Load profiles from YAML file."""
         if not self.profiles_path or not self.profiles_path.exists():
-            return  # No profiles file, just skip
+            logger.debug(f"No profiles file at: {self.profiles_path}")
+            return
 
-        with open(self.profiles_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with open(self.profiles_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
 
-        profiles_data = data.get("profiles", {})
-        for profile_id, profile_data in profiles_data.items():
-            self._profiles[profile_id] = Profile(
-                name=profile_data.get("name", profile_id),
-                description=profile_data.get("description", ""),
-                stages=profile_data.get("stages", []),
-            )
+            profiles_data = data.get("profiles", {})
+            for profile_id, profile_data in profiles_data.items():
+                self._profiles[profile_id] = Profile(
+                    name=profile_data.get("name", profile_id),
+                    description=profile_data.get("description", ""),
+                    stages=profile_data.get("stages", []),
+                )
+
+            logger.debug(f"Loaded {len(profiles_data)} profiles")
+        except Exception as e:
+            logger.warning(f"Failed to load profiles from {self.profiles_path}: {e}")
 
     def get_prompt(self, prompt_id: str) -> Optional[Prompt]:
         """Get a prompt by ID.
@@ -391,3 +485,34 @@ class PromptLibrary:
         self.load()
         prompt_ids = DEFAULT_STAGE_PROMPTS.get(stage, [])
         return [self.get_prompt(pid) for pid in prompt_ids if self.get_prompt(pid)]
+
+    def validate_profile(self, profile_id: str) -> dict[str, bool]:
+        """Validate that all prompts referenced in a profile exist.
+
+        Args:
+            profile_id: The profile identifier.
+
+        Returns:
+            Dict mapping stage/prompt names to existence (True if exists, False if missing).
+        """
+        self.load()
+        profile = self._profiles.get(profile_id)
+        if not profile:
+            return {}
+
+        results = {}
+        for stage in profile.stages:
+            results[stage] = self.get_prompt(stage) is not None
+        return results
+
+    def validate_all_profiles(self) -> dict[str, dict[str, bool]]:
+        """Validate all profiles and their prompts.
+
+        Returns:
+            Dict mapping profile_id to validation results (stage -> exists).
+        """
+        self.load()
+        results = {}
+        for profile_id in self._profiles:
+            results[profile_id] = self.validate_profile(profile_id)
+        return results
