@@ -31,6 +31,7 @@ from .analysis import (
 from .claude_runner import (
     ClaudeCodeRunner,
     ClaudeCodeResult,
+    ImplementationRecommendation,
     ImplementationReport,
     MockClaudeCodeRunner,
     TaskAnalysis,
@@ -121,7 +122,13 @@ class PlannedCall:
 
 @dataclass
 class RefinementResult:
-    """Result from a complete refinement run."""
+    """Result from a complete refinement run.
+
+    This dataclass includes an implementation_report field that contains
+    structured TaskAnalysis and ImplementationRecommendation data. This
+    enables the CURRENT Claude Code session to consume results directly
+    instead of spawning a subprocess.
+    """
 
     success: bool
     profile_name: str
@@ -133,6 +140,8 @@ class RefinementResult:
     iterations: list[IterationResult] = field(default_factory=list)
     planned_calls: list[PlannedCall] = field(default_factory=list)  # For dry-run mode
     partial_success: bool = False  # True when some stages succeeded but not all
+    # Structured report for direct Claude Code consumption (no subprocess)
+    implementation_report: Optional[ImplementationReport] = None
 
     @property
     def status(self) -> str:
@@ -147,6 +156,32 @@ class RefinementResult:
             return "partial_success"
         else:
             return "failure"
+
+    def to_markdown(self) -> str:
+        """Generate markdown summary including implementation report.
+
+        Returns:
+            Markdown-formatted summary of the refinement result.
+        """
+        lines = [
+            f"# Refinement Result: {self.status.upper()}",
+            "",
+            f"**Profile:** {self.profile_name}",
+            f"**Stages Completed:** {self.stages_completed}",
+            f"**Stages Failed:** {self.stages_failed}",
+        ]
+
+        if self.plan_path:
+            lines.append(f"**Plan Path:** {self.plan_path}")
+
+        if self.error:
+            lines.append(f"\n**Error:** {self.error}")
+
+        if self.implementation_report:
+            lines.append("\n---\n")
+            lines.append(self.implementation_report.to_markdown())
+
+        return "\n".join(lines)
 
 
 # =============================================================================
@@ -1306,6 +1341,17 @@ class Orchestrator:
             )
             logger.info(f"Plan written to: {plan_path}")
 
+        # Generate structured implementation report for Claude Code consumption
+        implementation_report = None
+        if stage_results:
+            implementation_report = self.implementation_executor.analyze_and_report(
+                stage_results
+            )
+            logger.info(
+                f"Generated implementation report with "
+                f"{len(implementation_report.tasks)} tasks"
+            )
+
         # Execute implementation if auto_implement is enabled
         if self.config.auto_implement and stage_results:
             logger.info("Auto-implementing changes with Claude Code...")
@@ -1323,6 +1369,7 @@ class Orchestrator:
             plan_path=plan_path,
             stage_results=stage_results,
             partial_success=stages_failed > 0 and stages_completed > 0,
+            implementation_report=implementation_report,
         )
 
     def refine_dry_run(self, profile_id: str) -> RefinementResult:
@@ -1512,6 +1559,16 @@ class Orchestrator:
             )
             logger.info(f"Plan written to: {plan_path}")
 
+        # Generate final aggregated implementation report
+        implementation_report = None
+        if all_stage_results:
+            implementation_report = self.implementation_executor.analyze_and_report(
+                all_stage_results
+            )
+            logger.info(
+                f"Final report: {len(implementation_report.tasks)} total tasks"
+            )
+
         return RefinementResult(
             success=stages_failed == 0 and stages_completed > 0,
             profile_name="iterative",
@@ -1521,6 +1578,7 @@ class Orchestrator:
             stage_results=all_stage_results,
             iterations=iterations,
             partial_success=stages_failed > 0 and stages_completed > 0,
+            implementation_report=implementation_report,
         )
 
     def refine_with_stage_triage(self, stages: list[str]) -> RefinementResult:
@@ -1628,6 +1686,16 @@ class Orchestrator:
             )
             logger.info(f"Plan written to: {plan_path}")
 
+        # Generate structured implementation report
+        implementation_report = None
+        if all_stage_results:
+            implementation_report = self.implementation_executor.analyze_and_report(
+                all_stage_results
+            )
+            logger.info(
+                f"Generated report with {len(implementation_report.tasks)} tasks"
+            )
+
         total_calls = triage_calls + analysis_calls
         logger.info(
             f"Stage triage complete: {triage_calls} triage calls, "
@@ -1642,6 +1710,7 @@ class Orchestrator:
             plan_path=plan_path,
             stage_results=all_stage_results,
             partial_success=stages_failed > 0 and stages_completed > 0,
+            implementation_report=implementation_report,
         )
 
     def run_stage_with_triage(
