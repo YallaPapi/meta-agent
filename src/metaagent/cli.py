@@ -1,4 +1,12 @@
-"""CLI entrypoint for meta-agent."""
+"""CLI entrypoint for meta-agent.
+
+This CLI operates on two conceptually distinct directories:
+1. "meta-agent repo" - Where the CLI code and config/ directory live (prompt library, profiles)
+2. "target repo" - The codebase being refined (where Repomix/codebase-digest run, where PRD lives)
+
+When dogfooding (running on itself), these are the same directory.
+When refining other repos, they are different.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +34,10 @@ app = typer.Typer(
 
 console = Console()
 
+# Default config directory (where meta-agent's prompts/profiles live)
+# This is relative to where the package is installed
+DEFAULT_CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
+
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging with Rich handler.
@@ -49,6 +61,32 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def get_config_dir(config_dir: Optional[Path]) -> Path:
+    """Resolve the config directory (where prompts/profiles live).
+
+    Args:
+        config_dir: User-provided config dir, or None for default.
+
+    Returns:
+        Resolved config directory path.
+    """
+    if config_dir:
+        return config_dir.resolve()
+
+    # Try default locations in order:
+    # 1. Package's config/ directory
+    # 2. Current working directory's config/
+    if DEFAULT_CONFIG_DIR.exists():
+        return DEFAULT_CONFIG_DIR
+
+    cwd_config = Path.cwd() / "config"
+    if cwd_config.exists():
+        return cwd_config
+
+    # Fall back to package config even if it doesn't exist (will error later)
+    return DEFAULT_CONFIG_DIR
+
+
 @app.callback()
 def main(
     version: bool = typer.Option(
@@ -66,22 +104,28 @@ def main(
 
 @app.command()
 def refine(
+    profile: str = typer.Option(
+        ...,
+        "--profile",
+        "-p",
+        help="Profile to use for refinement (e.g., 'automation_agent', 'quick_review').",
+    ),
     repo: Path = typer.Option(
         Path.cwd(),
         "--repo",
         "-r",
-        help="Path to the repository to refine.",
+        help="Path to the target repository to refine.",
     ),
     prd: Optional[Path] = typer.Option(
         None,
         "--prd",
-        help="Path to PRD file (default: docs/prd.md in repo).",
+        help="Path to PRD file (default: docs/prd.md in target repo).",
     ),
-    max_iterations: int = typer.Option(
-        10,
-        "--max-iterations",
-        "-n",
-        help="Maximum number of refinement iterations.",
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        "-c",
+        help="Path to meta-agent config directory containing prompts/profiles.",
     ),
     mock: bool = typer.Option(
         False,
@@ -95,25 +139,45 @@ def refine(
         help="Enable verbose output.",
     ),
 ) -> None:
-    """Run iterative refinement with AI-driven analysis.
+    """Run refinement analysis on a target repository.
 
-    The AI analyzes your codebase, decides which analysis prompts to run,
-    implements changes, commits to GitHub, and repeats until done.
+    This command analyzes the target codebase using the specified profile and
+    generates an improvement plan at docs/mvp_improvement_plan.md in the target repo.
+
+    Examples:
+        # Dogfooding (run on meta-agent itself):
+        metaagent refine --profile automation_agent --mock
+
+        # Refine another repository:
+        metaagent refine --profile automation_agent --repo /path/to/other/repo
+
+        # With explicit config directory:
+        metaagent refine --profile automation_agent --repo /path/to/repo --config-dir /path/to/meta-agent/config
     """
     setup_logging(verbose)
+    logger = logging.getLogger(__name__)
 
-    # Resolve paths
+    # Resolve target repo path
     repo_path = repo.resolve()
     if not repo_path.exists():
-        console.print(f"[red]Error:[/red] Repository path does not exist: {repo_path}")
+        console.print(f"[red]Error:[/red] Target repository does not exist: {repo_path}")
+        raise typer.Exit(1)
+
+    # Resolve config directory (where prompts/profiles live)
+    cfg_dir = get_config_dir(config_dir)
+    if not cfg_dir.exists():
+        console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")
+        console.print("[dim]Hint: Use --config-dir to specify the meta-agent config location[/dim]")
         raise typer.Exit(1)
 
     # Load configuration
     config = Config.from_env(repo_path)
+    config.config_dir = cfg_dir  # Override with resolved config dir
 
-    # Override with CLI options
+    # Override PRD path if provided
     if prd:
         config.prd_path = prd.resolve()
+
     if mock:
         config.mock_mode = True
 
@@ -125,14 +189,38 @@ def refine(
             console.print(f"  - {error}")
         raise typer.Exit(1)
 
-    # Run iterative refinement
-    console.print("\n[bold]Starting iterative refinement[/bold]")
-    console.print(f"[dim]Repository:[/dim] {repo_path}")
-    console.print(f"[dim]Max iterations:[/dim] {max_iterations}")
+    # Load and validate prompt library
+    try:
+        prompt_library = PromptLibrary(
+            prompts_path=config.prompts_file,
+            profiles_path=config.profiles_file,
+            prompt_library_path=config.prompt_library_path,
+        )
+        prompt_library.load()
+
+        if not prompt_library.get_profile(profile):
+            available = [p.name for p in prompt_library.list_profiles()]
+            console.print(f"[red]Error:[/red] Profile '{profile}' not found.")
+            if available:
+                console.print(f"Available profiles: {', '.join(available)}")
+            console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+            raise typer.Exit(1)
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+        raise typer.Exit(1)
+
+    # Display configuration
+    console.print(f"\n[bold]Starting refinement[/bold]")
+    console.print(f"[dim]Profile:[/dim] {profile}")
+    console.print(f"[dim]Target repo:[/dim] {repo_path}")
+    console.print(f"[dim]Config dir:[/dim] {cfg_dir}")
+    console.print(f"[dim]PRD:[/dim] {config.prd_path}")
     console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}\n")
 
-    orchestrator = Orchestrator(config)
-    result = orchestrator.refine(max_iterations=max_iterations)
+    # Run refinement
+    orchestrator = Orchestrator(config, prompt_library=prompt_library)
+    result = orchestrator.refine(profile)
 
     # Display results
     if result.success:
@@ -140,18 +228,163 @@ def refine(
     else:
         console.print("\n[yellow]Refinement completed with issues.[/yellow]\n")
 
-    console.print(f"Iterations completed: {len(result.iterations)}")
     console.print(f"Stages completed: {result.stages_completed}")
     console.print(f"Stages failed: {result.stages_failed}")
 
+    if result.plan_path:
+        console.print(f"\n[bold]Improvement plan written to:[/bold] {result.plan_path}")
+        console.print("\nNext steps:")
+        console.print("  1. Review the improvement plan")
+        console.print("  2. Open Claude Code in your repository")
+        console.print("  3. Ask Claude Code to implement the plan")
+
+    if result.error:
+        console.print(f"\n[red]Error:[/red] {result.error}")
+        raise typer.Exit(1)
+
+
+@app.command("refine-iterative")
+def refine_iterative(
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        "-r",
+        help="Path to the target repository to refine.",
+    ),
+    prd: Optional[Path] = typer.Option(
+        None,
+        "--prd",
+        help="Path to PRD file (default: docs/prd.md in target repo).",
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        "-c",
+        help="Path to meta-agent config directory containing prompts/profiles.",
+    ),
+    max_iterations: int = typer.Option(
+        10,
+        "--max-iterations",
+        "-n",
+        help="Maximum number of triage iterations to run.",
+    ),
+    mock: bool = typer.Option(
+        False,
+        "--mock",
+        "-m",
+        help="Run in mock mode (no API calls).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Enable verbose output.",
+    ),
+) -> None:
+    """Run iterative refinement with AI-driven triage.
+
+    Instead of running a fixed profile, this mode lets the AI decide which
+    prompts to run based on analyzing the codebase against the PRD. The loop:
+
+    1. Pack codebase with Repomix
+    2. Triage (AI decides which prompts to run)
+    3. Run selected analysis prompts
+    4. Implement changes with Claude Code
+    5. Commit changes
+    6. Repeat until done or max iterations reached
+
+    Examples:
+        # Run iterative refinement on current repo:
+        metaagent refine-iterative --mock
+
+        # Refine another repository with max 5 iterations:
+        metaagent refine-iterative --repo /path/to/repo --max-iterations 5
+    """
+    setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    # Resolve target repo path
+    repo_path = repo.resolve()
+    if not repo_path.exists():
+        console.print(f"[red]Error:[/red] Target repository does not exist: {repo_path}")
+        raise typer.Exit(1)
+
+    # Resolve config directory
+    cfg_dir = get_config_dir(config_dir)
+    if not cfg_dir.exists():
+        console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")
+        console.print("[dim]Hint: Use --config-dir to specify the meta-agent config location[/dim]")
+        raise typer.Exit(1)
+
+    # Load configuration
+    config = Config.from_env(repo_path)
+    config.config_dir = cfg_dir
+
+    if prd:
+        config.prd_path = prd.resolve()
+
+    if mock:
+        config.mock_mode = True
+
+    # Validate configuration
+    errors = config.validate()
+    if errors:
+        console.print("[red]Configuration errors:[/red]")
+        for error in errors:
+            console.print(f"  - {error}")
+        raise typer.Exit(1)
+
+    # Load prompt library
+    try:
+        prompt_library = PromptLibrary(
+            prompts_path=config.prompts_file,
+            profiles_path=config.profiles_file,
+            prompt_library_path=config.prompt_library_path,
+        )
+        prompt_library.load()
+
+        # Verify triage prompt exists
+        if not prompt_library.get_prompt("meta_triage"):
+            console.print("[red]Error:[/red] Triage prompt (meta_triage) not found in prompt library.")
+            console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+            raise typer.Exit(1)
+
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+        raise typer.Exit(1)
+
+    # Display configuration
+    console.print(f"\n[bold]Starting iterative refinement[/bold]")
+    console.print(f"[dim]Target repo:[/dim] {repo_path}")
+    console.print(f"[dim]Config dir:[/dim] {cfg_dir}")
+    console.print(f"[dim]PRD:[/dim] {config.prd_path}")
+    console.print(f"[dim]Max iterations:[/dim] {max_iterations}")
+    console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}\n")
+
+    # Run iterative refinement
+    orchestrator = Orchestrator(config, prompt_library=prompt_library)
+    result = orchestrator.refine_iterative(max_iterations=max_iterations)
+
+    # Display results
+    if result.success:
+        console.print("\n[green]Iterative refinement completed successfully![/green]\n")
+    else:
+        console.print("\n[yellow]Iterative refinement completed with issues.[/yellow]\n")
+
+    console.print(f"Iterations run: {len(result.iterations)}")
+    console.print(f"Stages completed: {result.stages_completed}")
+    console.print(f"Stages failed: {result.stages_failed}")
+
+    # Show iteration summary
     if result.iterations:
         console.print("\n[bold]Iteration Summary:[/bold]")
-        for it in result.iterations:
-            status = "[green]committed[/green]" if it.committed else "[yellow]no changes[/yellow]"
-            console.print(f"  {it.iteration}. {', '.join(it.prompts_run)} - {status}")
+        for iteration in result.iterations:
+            prompts = ", ".join(iteration.prompts_run) if iteration.prompts_run else "none"
+            status = "[green]✓[/green]" if iteration.changes_made else "[dim]-[/dim]"
+            console.print(f"  {status} Iteration {iteration.iteration}: {prompts}")
 
     if result.plan_path:
-        console.print(f"\n[bold]Final plan written to:[/bold] {result.plan_path}")
+        console.print(f"\n[bold]Improvement plan written to:[/bold] {result.plan_path}")
 
     if result.error:
         console.print(f"\n[red]Error:[/red] {result.error}")
@@ -168,8 +401,7 @@ def list_profiles(
     ),
 ) -> None:
     """List available refinement profiles."""
-    # Determine config directory
-    cfg_dir = config_dir.resolve() if config_dir else Path.cwd() / "config"
+    cfg_dir = get_config_dir(config_dir)
 
     if not cfg_dir.exists():
         console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")
@@ -193,7 +425,7 @@ def list_profiles(
         return
 
     table = Table(title="Available Profiles")
-    table.add_column("Name", style="cyan")
+    table.add_column("ID", style="cyan")
     table.add_column("Description")
     table.add_column("Stages", style="dim")
 
@@ -221,8 +453,7 @@ def list_prompts(
     ),
 ) -> None:
     """List available analysis prompts from codebase-digest."""
-    # Determine config directory
-    cfg_dir = config_dir.resolve() if config_dir else Path.cwd() / "config"
+    cfg_dir = get_config_dir(config_dir)
 
     if not cfg_dir.exists():
         console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")

@@ -51,6 +51,55 @@ def sample_prompts_yaml(tmp_path: Path) -> Path:
       Code: {{ code_context }}
       History: {{ history }}
       Stage: {{ current_stage }}
+  meta_triage:
+    id: meta_triage
+    goal: "Triage codebase and select prompts"
+    stage: triage
+    template: |
+      Analyze this codebase and select prompts to run.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
+      History: {{ history }}
+  quality_error_analysis:
+    id: quality_error_analysis
+    goal: "Find errors and inconsistencies"
+    stage: quality
+    template: |
+      Analyze for errors.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
+  architecture_layer_identification:
+    id: architecture_layer_identification
+    goal: "Identify architectural layers"
+    stage: architecture
+    template: |
+      Identify layers.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
+  quality_code_complexity_analysis:
+    id: quality_code_complexity_analysis
+    goal: "Analyze code complexity"
+    stage: quality
+    template: |
+      Analyze complexity.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
+  testing_unit_test_generation:
+    id: testing_unit_test_generation
+    goal: "Generate unit tests"
+    stage: testing
+    template: |
+      Generate tests.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
+  improvement_best_practice_analysis:
+    id: improvement_best_practice_analysis
+    goal: "Check best practices"
+    stage: improvement
+    template: |
+      Check best practices.
+      PRD: {{ prd }}
+      Code: {{ code_context }}
 """
     prompts_path = tmp_path / "prompts.yaml"
     prompts_path.write_text(prompts_content)

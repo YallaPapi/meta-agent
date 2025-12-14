@@ -42,14 +42,21 @@ class AnalysisEngine(ABC):
 class MockAnalysisEngine(AnalysisEngine):
     """Mock analysis engine for testing without API calls."""
 
-    def __init__(self, responses: Optional[dict[str, AnalysisResult]] = None):
+    def __init__(
+        self,
+        responses: Optional[dict[str, AnalysisResult]] = None,
+        done_after_iterations: int = 3,
+    ):
         """Initialize mock engine with optional predefined responses.
 
         Args:
             responses: Optional dict mapping prompt substrings to responses.
+            done_after_iterations: Number of triage calls before returning done=true.
         """
         self.responses = responses or {}
         self.call_count = 0
+        self.triage_count = 0
+        self.done_after_iterations = done_after_iterations
         self.last_prompt: Optional[str] = None
 
     def analyze(self, prompt: str) -> AnalysisResult:
@@ -68,6 +75,12 @@ class MockAnalysisEngine(AnalysisEngine):
         for key, response in self.responses.items():
             if key in prompt:
                 return response
+
+        # Handle triage prompts specially - check for the actual triage prompt markers
+        # Be specific to avoid matching history that contains previous triage results
+        if "codebase triage and prompt selection" in prompt.lower() or \
+           "determine which analysis prompts should be run next" in prompt.lower():
+            return self._mock_triage_response()
 
         # Default mock response
         return AnalysisResult(
@@ -89,13 +102,60 @@ class MockAnalysisEngine(AnalysisEngine):
             success=True,
         )
 
+    def _mock_triage_response(self) -> AnalysisResult:
+        """Return a mock triage response.
+
+        Returns:
+            AnalysisResult with triage JSON.
+        """
+        self.triage_count += 1
+
+        # Cycle through different prompts for variety
+        prompt_sets = [
+            ["quality_error_analysis", "architecture_layer_identification"],
+            ["quality_code_complexity_analysis", "testing_unit_test_generation"],
+            ["improvement_best_practice_analysis"],
+        ]
+
+        # After enough iterations, say we're done
+        if self.triage_count >= self.done_after_iterations:
+            triage_data = {
+                "assessment": "The codebase meets PRD requirements and is production-ready.",
+                "priority_issues": [],
+                "selected_prompts": [],
+                "reasoning": "All major issues have been addressed in previous iterations.",
+                "done": True,
+            }
+        else:
+            prompt_index = (self.triage_count - 1) % len(prompt_sets)
+            selected = prompt_sets[prompt_index]
+
+            triage_data = {
+                "assessment": f"Mock triage iteration {self.triage_count}: Found areas needing improvement.",
+                "priority_issues": [
+                    f"Mock issue {self.triage_count}.1: Code quality needs review",
+                    f"Mock issue {self.triage_count}.2: Architecture could be improved",
+                ],
+                "selected_prompts": selected,
+                "reasoning": f"Selected {len(selected)} prompts for mock iteration {self.triage_count}.",
+                "done": False,
+            }
+
+        return AnalysisResult(
+            summary=json.dumps(triage_data),
+            recommendations=[],
+            tasks=[],
+            raw_response=json.dumps(triage_data),
+            success=True,
+        )
+
 
 class PerplexityAnalysisEngine(AnalysisEngine):
     """Analysis engine using Perplexity API."""
 
     API_URL = "https://api.perplexity.ai/chat/completions"
 
-    def __init__(self, api_key: str, timeout: int = 120, model: str = "llama-3.1-sonar-large-128k-online"):
+    def __init__(self, api_key: str, timeout: int = 120, model: str = "sonar-pro"):
         """Initialize Perplexity analysis engine.
 
         Args:
@@ -146,10 +206,15 @@ class PerplexityAnalysisEngine(AnalysisEngine):
             return self._parse_response(content)
 
         except httpx.HTTPStatusError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
             return AnalysisResult(
                 summary="",
                 success=False,
-                error=f"HTTP error from Perplexity API: {e.response.status_code}",
+                error=f"HTTP error from Perplexity API: {e.response.status_code} - {error_body}",
                 raw_response=str(e),
             )
         except httpx.TimeoutException:
