@@ -1,0 +1,993 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Initialize Python Project Structure",
+        "description": "Set up the Python project with pyproject.toml, create the directory structure as specified in the PRD, and configure development dependencies.",
+        "details": "Create the following structure:\n\n1. Create `pyproject.toml` with:\n   - Project metadata (name='metaagent', version='0.1.0')\n   - Python 3.10+ requirement\n   - Dependencies: click or typer, pyyaml, httpx, python-dotenv, jinja2\n   - Dev dependencies: pytest, pytest-cov, pytest-asyncio\n   - Entry point: metaagent = 'metaagent.cli:main'\n\n2. Create directory structure:\n   ```\n   src/metaagent/__init__.py\n   src/metaagent/cli.py (stub)\n   src/metaagent/orchestrator.py (stub)\n   src/metaagent/repomix.py (stub)\n   src/metaagent/prompts.py (stub)\n   src/metaagent/analysis.py (stub)\n   src/metaagent/plan_writer.py (stub)\n   src/metaagent/config.py (stub)\n   config/prompts.yaml (empty structure)\n   config/profiles.yaml (empty structure)\n   tests/__init__.py\n   tests/test_cli.py (stub)\n   tests/test_orchestrator.py (stub)\n   docs/\n   ```\n\n3. Update .gitignore for Python:\n   - __pycache__/, *.pyc, *.pyo\n   - .venv/, venv/, .env\n   - dist/, build/, *.egg-info/\n   - .pytest_cache/, .coverage\n\n4. Create README.md with basic project description and setup instructions.",
+        "testStrategy": "Verify project structure exists with `ls -R`. Verify `uv pip install -e .` or `pip install -e .` succeeds. Verify `metaagent --help` runs without errors (will show help from stub CLI).",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Author modern pyproject.toml with src-layout and dependency groups",
+            "description": "Create pyproject.toml file with project metadata, Python 3.10+ requirement, runtime and dev dependencies, and console_script entry point using modern standards.",
+            "dependencies": [],
+            "details": "Use [tool.uv] or [build-system] with hatchling; define [project] table with name='metaagent', version='0.1.0', requires-python='>=3.10'; dependencies=['click', 'pyyaml', 'httpx', 'python-dotenv', 'jinja2']; optional-dependencies.dev=['pytest', 'pytest-cov', 'pytest-asyncio']; [project.scripts] metaagent='metaagent.cli:main'; enable src-layout with packages=['src/metaagent'].",
+            "status": "pending",
+            "testStrategy": "Verify with `uv pip install -e .` or `pip install -e .` succeeds without errors; check `metaagent --help` displays CLI help from stub; validate TOML syntax and metadata with `uv project info`.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Create src/, config/, tests/, and docs/ directory skeletons",
+            "description": "Set up complete directory structure with all specified empty stub files as per PRD requirements.",
+            "dependencies": [
+              1
+            ],
+            "details": "Create directories: src/metaagent/, config/, tests/, docs/; add __init__.py files to src/metaagent/ and tests/; create stub Python files: cli.py, orchestrator.py, repomix.py, prompts.py, analysis.py, plan_writer.py, config.py; create empty YAML files: config/prompts.yaml, config/profiles.yaml.",
+            "status": "pending",
+            "testStrategy": "Run `ls -R src config tests docs` to verify exact structure matches spec; ensure all stub files exist and contain pass or basic if __name__ == '__main__' guards.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Set up .gitignore for Python projects and common tooling",
+            "description": "Create comprehensive .gitignore covering Python caches, virtualenvs, build artifacts, and testing caches.",
+            "dependencies": [
+              1
+            ],
+            "details": "Include patterns: __pycache__/, *.pyc, *.pyo, *.pyd; .venv/, venv/, ENV/, env/; .env, .env.*; dist/, build/, *.egg-info/, *.whl; .pytest_cache/, .coverage, .coverage.*; recommend adding .uv/, uv.lock if using uv tooling.",
+            "status": "pending",
+            "testStrategy": "Verify git ignores files by creating test files matching patterns and running `git status --ignored`; ensure common ignore files like .env are properly excluded.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Create minimal README.md with install, usage, and dev notes",
+            "description": "Write basic project README including project description, installation instructions, basic usage, and development setup.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Include sections: # MetaAgent (AI-powered repo refinement); ## Installation (`uv venv; uv pip install -e .` or pip); ## Usage (`metaagent --help`); ## Development (pytest, pre-commit if added); ## Structure overview; link to PRD/docs.",
+            "status": "pending",
+            "testStrategy": "Verify README renders correctly in GitHub/Markdown viewer; check all commands in install/usage sections execute successfully after project setup.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 3,
+        "recommendedSubtasks": 4,
+        "expansionPrompt": "Break down Task 1 (Initialize Python Project Structure) into 4 concrete subtasks covering: (1) authoring a modern pyproject.toml with src-layout, dependency groups for dev, and console_script entry point; (2) creating the specified src/, config/, tests/, and docs/ directory/files skeletons; (3) setting up .gitignore following Python and common tooling patterns; (4) creating a minimal but correct README.md with install, usage, and development notes. For each subtask, specify clear acceptance criteria and any tooling conventions (e.g., uv, pytest).",
+        "updatedAt": "2025-12-14T01:59:42.237Z"
+      },
+      {
+        "id": "2",
+        "title": "Implement Configuration Management",
+        "description": "Create the config.py module to handle environment variables, application settings, and provide a centralized configuration interface.",
+        "details": "Implement `src/metaagent/config.py`:\n\n```python\nimport os\nfrom pathlib import Path\nfrom dataclasses import dataclass\nfrom dotenv import load_dotenv\n\n@dataclass\nclass Config:\n    perplexity_api_key: str | None\n    anthropic_api_key: str | None\n    log_level: str\n    timeout: int\n    max_tokens: int\n    repo_path: Path\n    prd_path: Path\n    config_dir: Path\n    output_dir: Path\n\n    @classmethod\n    def from_env(cls, repo_path: Path | None = None) -> 'Config':\n        load_dotenv()\n        repo = repo_path or Path.cwd()\n        return cls(\n            perplexity_api_key=os.getenv('PERPLEXITY_API_KEY'),\n            anthropic_api_key=os.getenv('ANTHROPIC_API_KEY'),\n            log_level=os.getenv('METAAGENT_LOG_LEVEL', 'INFO'),\n            timeout=int(os.getenv('METAAGENT_TIMEOUT', '120')),\n            max_tokens=int(os.getenv('METAAGENT_MAX_TOKENS', '100000')),\n            repo_path=repo,\n            prd_path=repo / 'docs' / 'prd.md',\n            config_dir=Path(__file__).parent.parent.parent / 'config',\n            output_dir=repo / 'docs'\n        )\n\n    def validate(self) -> list[str]:\n        \"\"\"Return list of validation errors, empty if valid.\"\"\"\n        errors = []\n        if not self.repo_path.exists():\n            errors.append(f'Repository path does not exist: {self.repo_path}')\n        if not self.config_dir.exists():\n            errors.append(f'Config directory does not exist: {self.config_dir}')\n        return errors\n```\n\nKey features:\n- Load from environment variables with defaults\n- Dataclass for type safety and immutability\n- Path resolution for repo, PRD, config, and output directories\n- Validation method for required paths\n- Support for both installed package and development mode paths",
+        "testStrategy": "Unit tests in `tests/test_config.py`:\n1. Test Config.from_env() with mocked environment variables\n2. Test default values when env vars not set\n3. Test validate() returns errors for missing paths\n4. Test validate() returns empty list for valid paths\n5. Test path resolution works correctly",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Implement Config dataclass and from_env() factory with dotenv loading and robust defaults",
+            "description": "Create the Config dataclass and the from_env() classmethod to load configuration from environment variables using python-dotenv, including sensible defaults and safe type conversion.",
+            "dependencies": [],
+            "details": "- Define the Config dataclass exactly as specified (API keys, log_level, timeout, max_tokens, repo_path, prd_path, config_dir, output_dir) with appropriate type hints.\n- Implement from_env() to call load_dotenv() first so that .env files are respected.\n- Accept an optional repo_path argument; if not provided, default to Path.cwd().\n- Read PERPLEXITY_API_KEY and ANTHROPIC_API_KEY from the environment; allow them to be missing (set to None) without raising.\n- Read METAAGENT_LOG_LEVEL, METAAGENT_TIMEOUT, METAAGENT_MAX_TOKENS with robust defaulting and type conversion (e.g., fall back to safe defaults if env values are malformed integers).\n- Compute prd_path as repo_path / 'docs' / 'prd.md'.\n- Compute config_dir relative to the installed package layout (e.g., Path(__file__).parent.parent.parent / 'config') so it works in both editable and installed modes.\n- Compute output_dir as repo_path / 'docs', creating only paths in later code, not here.\n- Edge cases to consider and later test: missing env vars (ensure defaults/None used), invalid integer values for timeout/max_tokens (decide on fallback behavior, e.g., catch ValueError and revert to defaults rather than crash), unusual CWD when repo_path is not passed.\n- Do not perform filesystem existence checks here; leave that to validate().",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement validate() with repo/config/output/PRD path checks and dev vs installed behavior",
+            "description": "Implement the validate() method to check existence and correctness of key paths (repo_path, config_dir, output_dir, prd_path), handling differences between development and installed package modes.",
+            "dependencies": [
+              1
+            ],
+            "details": "- Extend validate() to return a list of human-readable error strings describing configuration problems; keep empty list on success.\n- Check that repo_path exists and is a directory; if not, add an error.\n- Check that config_dir exists and is a directory; if not, add an error describing that configuration assets are missing.\n- Check that output_dir exists or, if your design requires it, that its parent exists; decide whether absence of output_dir is an error (e.g., might be created later) or only a warning (still represented as an error string if you choose to enforce creation upfront).\n- Check that prd_path exists and is a file; add an error if the PRD is missing so downstream components (orchestrator, plan writer) can fail early.\n- For dev vs installed modes, base behavior only on the resolved config_dir path: for example, treat a config_dir located inside the source tree (e.g., under src/metaagent/../config) as dev mode, and a site-packages-like path as installed mode; ensure validate() behaves consistently in both, without hard-coding environment-specific assumptions.\n- Ensure validate() never raises; all issues must be represented as error messages so callers can decide how to handle them.\n- Edge cases and expectations: non-existent repo_path passed explicitly; repo_path that exists but lacks docs/ or prd.md; config_dir missing because package assets not installed; output_dir pointing to a file instead of a directory; paths that are symlinks (still treated as existing).",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Wire Config into a minimal caller (stub CLI or script) to exercise usage patterns",
+            "description": "Create a small entrypoint (e.g., a stub CLI command or script) that constructs Config.from_env(), runs validate(), and reports configuration status, to verify real-world usage patterns.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "- Implement a minimal callable entrypoint, such as a function main() or a tiny Typer/Rich-based CLI stub under src/metaagent, that imports and uses Config.\n- In the entrypoint, call Config.from_env() with an optional repo_path argument (e.g., from CLI flag or default Path.cwd()).\n- Immediately call config.validate() and, if errors are returned, print them in a user-friendly way and exit with a non-zero status code.\n- On success (no validation errors), print or log key configuration values (e.g., repo_path, prd_path, config_dir, output_dir, timeout, log_level) without exposing sensitive API keys.\n- Ensure the entrypoint demonstrates how higher-level components (orchestrator, CLI) will interact with Config, including typical error-handling flow.\n- Edge cases and expectations: behavior when repo_path points to a non-existent directory (entrypoint should show validation errors, not crash); behavior with missing PRD or config_dir (clear error output); running from different working directories to confirm repo_path resolution is intuitive.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Create focused pytest unit tests for Config using monkeypatch and tmp_path",
+            "description": "Add pytest unit tests covering environment-variable handling, default values, path resolution, and validate() behavior across various filesystem scenarios using monkeypatch and tmp_path.",
+            "dependencies": [
+              1,
+              2,
+              3
+            ],
+            "details": "- Implement tests in tests/test_config.py structured around the provided test strategy.\n- Use monkeypatch to control os.environ for Config.from_env() tests, including setting PERPLEXITY_API_KEY, ANTHROPIC_API_KEY, METAAGENT_LOG_LEVEL, METAAGENT_TIMEOUT, and METAAGENT_MAX_TOKENS, and clearing them to test defaults.\n- Test edge cases of env parsing: missing API keys (must yield None), missing optional settings (must use defaults), and invalid integer strings for timeout/max_tokens (must fall back safely instead of raising).\n- Use tmp_path to create ephemeral directory structures representing a fake repo with docs/, prd.md, and optional config/ directory, passing these paths into Config instances for validation tests.\n- Write tests where repo_path does not exist, config_dir does not exist, output_dir points to a file instead of a directory, and prd.md is missing; assert that validate() returns clear error messages for each condition.\n- Add a test to confirm that path resolution from from_env() (repo_path, prd_path, config_dir, output_dir) matches expectations when run from different working directories or with an explicit repo_path.\n- Optionally add an integration-style test that uses the minimal caller entrypoint to confirm end-to-end behavior (construct, validate, and report), asserting correct exit codes and output using pytest’s capsys or CliRunner if using Typer.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 4,
+        "recommendedSubtasks": 4,
+        "expansionPrompt": "Break down Task 2 (Implement Configuration Management) into 4 subtasks: (1) implement Config dataclass and from_env factory using python-dotenv and robust type conversion with defaults; (2) implement validate() including repo/config/output/PRD path checks and behavior in dev vs installed modes; (3) wire Config into a minimal caller (e.g., stub CLI) to verify usage patterns; (4) create focused pytest unit tests using monkeypatch/tmp_path for environment and filesystem scenarios. For each subtask, call out edge cases (missing env vars, non-existent paths) and test expectations.",
+        "updatedAt": "2025-12-14T01:59:48.825Z"
+      },
+      {
+        "id": "3",
+        "title": "Implement Prompt and Profile Loading",
+        "description": "Create the prompts.py module to load and render prompt templates from YAML configuration, and load profile definitions that map stages to prompts.",
+        "details": "Implement `src/metaagent/prompts.py`:\n\n```python\nfrom pathlib import Path\nfrom dataclasses import dataclass\nimport yaml\nfrom jinja2 import Template\n\n@dataclass\nclass Prompt:\n    id: str\n    goal: str\n    stage: str\n    template: str\n\n    def render(self, prd: str, code_context: str, history: str, current_stage: str) -> str:\n        \"\"\"Render template with provided variables.\"\"\"\n        tmpl = Template(self.template)\n        return tmpl.render(\n            prd=prd,\n            code_context=code_context,\n            history=history,\n            current_stage=current_stage\n        )\n\n@dataclass\nclass Profile:\n    name: str\n    description: str\n    stages: list[str]\n\nclass PromptLibrary:\n    def __init__(self, config_dir: Path):\n        self.config_dir = config_dir\n        self._prompts: dict[str, Prompt] = {}\n        self._profiles: dict[str, Profile] = {}\n        self._load()\n\n    def _load(self):\n        # Load prompts.yaml\n        prompts_file = self.config_dir / 'prompts.yaml'\n        if prompts_file.exists():\n            with open(prompts_file) as f:\n                data = yaml.safe_load(f)\n            for pid, pdata in data.get('prompts', {}).items():\n                self._prompts[pid] = Prompt(\n                    id=pdata['id'],\n                    goal=pdata['goal'],\n                    stage=pdata['stage'],\n                    template=pdata['template']\n                )\n\n        # Load profiles.yaml\n        profiles_file = self.config_dir / 'profiles.yaml'\n        if profiles_file.exists():\n            with open(profiles_file) as f:\n                data = yaml.safe_load(f)\n            for pname, pdata in data.get('profiles', {}).items():\n                self._profiles[pname] = Profile(\n                    name=pdata['name'],\n                    description=pdata['description'],\n                    stages=pdata['stages']\n                )\n\n    def get_prompt(self, prompt_id: str) -> Prompt | None:\n        return self._prompts.get(prompt_id)\n\n    def get_profile(self, profile_name: str) -> Profile | None:\n        return self._profiles.get(profile_name)\n\n    def list_profiles(self) -> list[str]:\n        return list(self._profiles.keys())\n\n    def get_prompts_for_profile(self, profile_name: str) -> list[Prompt]:\n        profile = self.get_profile(profile_name)\n        if not profile:\n            return []\n        return [self._prompts[s] for s in profile.stages if s in self._prompts]\n```\n\nPopulate `config/prompts.yaml` and `config/profiles.yaml` with the exact content from PRD Section 7.1 and 7.2.",
+        "testStrategy": "Unit tests in `tests/test_prompts.py`:\n1. Test loading prompts from YAML file\n2. Test loading profiles from YAML file\n3. Test Prompt.render() with template variables\n4. Test get_prompts_for_profile() returns correct ordered list\n5. Test handling of missing files gracefully\n6. Test list_profiles() returns all profile names",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define Prompt and Profile dataclasses and PromptLibrary public interface",
+            "description": "Create the Prompt and Profile dataclasses and sketch the PromptLibrary API surface that will manage loading and accessing prompts and profiles.",
+            "dependencies": [
+              3
+            ],
+            "details": "Implement Prompt and Profile as @dataclass structures with the fields specified in the PRD (id, goal, stage, template for Prompt; name, description, stages for Profile). Define the PromptLibrary __init__(config_dir: Path) signature and internal dictionaries for prompts and profiles. Stub out _load(), get_prompt(), get_profile(), list_profiles(), and get_prompts_for_profile() with type hints and docstrings but no logic yet, ensuring the interface is stable for later use by orchestrator and CLI.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement YAML loading with safe_load, validation, and missing-file behavior",
+            "description": "Add YAML loading logic to PromptLibrary that reads prompts.yaml and profiles.yaml, using yaml.safe_load with graceful handling of missing files and malformed content.",
+            "dependencies": [
+              1
+            ],
+            "details": "In PromptLibrary._load(), implement reading config_dir / 'prompts.yaml' and config_dir / 'profiles.yaml' using context managers and yaml.safe_load. If a file does not exist, skip loading without raising, so construction of PromptLibrary has minimal side effects and is deterministic. Add minimal schema validation (e.g., ensure top-level keys 'prompts' and 'profiles' are dicts, required fields exist) and either log or raise clear exceptions for invalid structures while keeping side effects confined to object state. Avoid any global state; all loaded data should be stored only in self._prompts and self._profiles so tests can inject a temporary config_dir with fixture YAML files.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement Prompt.render() using Jinja2 with fixed variable contract and error guardrails",
+            "description": "Complete the Prompt.render() method so it renders templates with a fixed set of variables via Jinja2, handling template errors safely.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Use jinja2.Template to compile self.template and render it with a fixed context including prd, code_context, history, and current_stage. Decide on behavior for template syntax or rendering errors (e.g., catch TemplateError and either re-raise a custom exception or return a fallback string) to prevent hard crashes in callers like the orchestrator. Keep rendering pure and side-effect free: no file I/O or logging inside render, so unit tests can call it deterministically. Document the variable contract in the render docstring so YAML templates in prompts.yaml can rely on a stable set of fields.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement profile and prompt lookup helpers with ordering guarantees",
+            "description": "Fill in PromptLibrary helper methods for querying prompts and profiles, ensuring get_prompts_for_profile preserves the profile-defined stage order and handles missing mappings robustly.",
+            "dependencies": [
+              2,
+              3
+            ],
+            "details": "Implement get_prompt(prompt_id) and get_profile(profile_name) as simple dictionary lookups returning None when not found. Implement list_profiles() to return profile names in deterministic order (e.g., sorted or insertion order, documented explicitly). Implement get_prompts_for_profile(profile_name) to resolve the profile, then map profile.stages entries to Prompt instances, skipping unknown prompt IDs safely while preserving the original stage order. Keep logic purely in-memory so tests can construct PromptLibrary against temporary YAML directories without global side effects.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Write unit tests for YAML loading, rendering, helpers, and error cases",
+            "description": "Create tests in tests/test_prompts.py that cover YAML fixtures, prompt rendering, helper behaviors, missing files, and invalid data, while keeping loading side effects isolated.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "Add pytest-based tests that use temporary directories to host prompts.yaml and profiles.yaml fixtures derived from PRD sections 7.1 and 7.2. Test that PromptLibrary loads valid YAML into correct Prompt and Profile objects, that Prompt.render() correctly interpolates all supported variables, and that get_prompts_for_profile() returns prompts in the expected stage order. Add tests for behavior when prompts.yaml and/or profiles.yaml are missing (PromptLibrary still constructs and methods return empty/None appropriately) and when YAML contains invalid structures or missing required fields. Ensure each test constructs its own PromptLibrary instance pointing at an isolated temp config_dir so there are no cross-test side effects or reliance on global filesystem state.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 5,
+        "recommendedSubtasks": 5,
+        "expansionPrompt": "Break down Task 3 (Implement Prompt and Profile Loading) into 5 subtasks: (1) define Prompt and Profile dataclasses plus PromptLibrary interface; (2) implement YAML loading with safe_load, error handling, and missing-file behavior; (3) implement Prompt.render() using Jinja2 with a fixed variable contract and guardrails for template errors; (4) implement profile/query helpers (get_prompt, get_profile, list_profiles, get_prompts_for_profile) with ordering guarantees; (5) write unit tests covering YAML fixtures, rendering, missing files, and invalid data cases. Explicitly note how to keep loading side effects contained for testability.",
+        "updatedAt": "2025-12-14T01:59:55.377Z"
+      },
+      {
+        "id": "4",
+        "title": "Implement Repomix Integration",
+        "description": "Create the repomix.py module to run Repomix CLI as a subprocess and return the packed codebase content.",
+        "details": "Implement `src/metaagent/repomix.py`:\n\n```python\nimport subprocess\nimport tempfile\nfrom pathlib import Path\nfrom dataclasses import dataclass\n\n@dataclass\nclass RepomixResult:\n    success: bool\n    content: str\n    error: str | None = None\n\nclass RepomixRunner:\n    def __init__(self, timeout: int = 120):\n        self.timeout = timeout\n\n    def pack(self, repo_path: Path) -> RepomixResult:\n        \"\"\"\n        Run Repomix on the given repository and return packed content.\n        \n        Args:\n            repo_path: Path to the repository to pack\n            \n        Returns:\n            RepomixResult with success status and content or error\n        \"\"\"\n        with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as tmp:\n            output_file = Path(tmp.name)\n        \n        try:\n            result = subprocess.run(\n                ['npx', '-y', 'repomix', '--output', str(output_file)],\n                cwd=str(repo_path),\n                capture_output=True,\n                text=True,\n                timeout=self.timeout\n            )\n            \n            if result.returncode != 0:\n                return RepomixResult(\n                    success=False,\n                    content='',\n                    error=f'Repomix failed: {result.stderr}'\n                )\n            \n            content = output_file.read_text(encoding='utf-8')\n            return RepomixResult(success=True, content=content)\n            \n        except subprocess.TimeoutExpired:\n            return RepomixResult(\n                success=False,\n                content='',\n                error=f'Repomix timed out after {self.timeout}s'\n            )\n        except FileNotFoundError:\n            return RepomixResult(\n                success=False,\n                content='',\n                error='npx/repomix not found. Ensure Node.js is installed.'\n            )\n        finally:\n            output_file.unlink(missing_ok=True)\n\n    def truncate_content(self, content: str, max_tokens: int) -> str:\n        \"\"\"Truncate content to fit within token budget (rough char estimate).\"\"\"\n        # Rough estimate: 1 token ≈ 4 characters\n        max_chars = max_tokens * 4\n        if len(content) <= max_chars:\n            return content\n        return content[:max_chars] + '\\n\\n[Content truncated to fit token limit]'\n```\n\nKey considerations:\n- Use npx to run repomix without global installation\n- Capture output to temp file and read content\n- Handle timeout errors gracefully\n- Handle missing npx/node gracefully\n- Provide truncation utility for context budget",
+        "testStrategy": "Unit tests in `tests/test_repomix.py`:\n1. Test successful pack with mock subprocess (mock subprocess.run)\n2. Test timeout handling\n3. Test error handling for failed subprocess\n4. Test FileNotFoundError handling\n5. Test truncate_content() with content under limit\n6. Test truncate_content() with content over limit\n7. Integration test with real Repomix on small test repo (optional, mark as slow)",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Design RepomixResult dataclass and RepomixRunner API",
+            "description": "Define the data class for results and the main class structure with init and method signatures.",
+            "dependencies": [],
+            "details": "Create RepomixResult dataclass with success, content, error fields. Define RepomixRunner __init__ with timeout param and pack() method signature accepting Path returning RepomixResult. Add truncate_content signature.",
+            "status": "pending",
+            "testStrategy": "Verify dataclass field types and defaults. Test __init__ sets timeout correctly. Test method signatures via inspect.signature.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement pack() method core logic with subprocess and temp file",
+            "description": "Implement the main subprocess.run call using npx repomix with temp file output and cwd set to repo_path.",
+            "dependencies": [
+              1
+            ],
+            "details": "Use tempfile.NamedTemporaryFile for output. Run subprocess.run(['npx', '-y', 'repomix', '--output', str(output_file)], cwd=str(repo_path), capture_output=True, text=True, timeout=self.timeout). Read content on success. Ensure cleanup in finally block with unlink(missing_ok=True).",
+            "status": "pending",
+            "testStrategy": "Mock subprocess.run returning success (returncode=0). Verify temp file path passed correctly to --output. Verify cwd set to repo_path. Verify content read from temp file after success.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Add comprehensive error handling branches",
+            "description": "Handle subprocess failure, timeout, and missing npx/Node.js cases with descriptive error messages in RepomixResult.",
+            "dependencies": [
+              2
+            ],
+            "details": "Check result.returncode != 0 and return error with result.stderr. Catch subprocess.TimeoutExpired with timeout message. Catch FileNotFoundError with 'npx/repomix not found' message ensuring Node.js check.",
+            "status": "pending",
+            "testStrategy": "Mock subprocess.run with returncode=1 and stderr. Mock TimeoutExpired exception. Mock FileNotFoundError. Verify each returns RepomixResult(success=False, error=expected_message).",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement truncate_content() with token estimation",
+            "description": "Add utility method to truncate content based on max_tokens using 4 chars per token heuristic.",
+            "dependencies": [
+              1
+            ],
+            "details": "Calculate max_chars = max_tokens * 4. Return content unchanged if under limit. Otherwise truncate and append '[Content truncated to fit token limit]' suffix. Document the 1 token ≈ 4 chars approximation.",
+            "status": "pending",
+            "testStrategy": "Test content under limit returns unchanged. Test exact boundary (max_chars). Test over limit truncates correctly with suffix. Test empty string and max_tokens=0 edge cases.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Write comprehensive unit tests with mocks for CI stability",
+            "description": "Create test_repomix.py with pytest monkeypatch covering all success/failure paths without requiring Node.js.",
+            "dependencies": [
+              2,
+              3,
+              4
+            ],
+            "details": "Use monkeypatch to mock subprocess.run for success/failure/timeout cases. Mock Path.read_text() and tempfile.NamedTemporaryFile. Test truncate_content boundaries. Ensure tests pass in CI without Node/repomix installed by mocking all external calls.",
+            "status": "pending",
+            "testStrategy": "Coverage: success pack, failed subprocess, timeout, FileNotFoundError, truncate under/over limit. Verify temp file cleanup called. Use pytest tmp_path for filesystem isolation. Mock Path.unlink().",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 6,
+        "recommendedSubtasks": 5,
+        "expansionPrompt": "Break down Task 4 (Implement Repomix Integration) into 5 subtasks: (1) design RepomixResult dataclass and RepomixRunner API; (2) implement pack() using subprocess.run with cwd, temp file handling, and robust cleanup in finally; (3) implement error handling branches for non-zero exit, TimeoutExpired, and FileNotFoundError with clear messages; (4) implement truncate_content() with a well-documented token-to-char heuristic and tests around boundaries; (5) write unit tests using monkeypatch to mock subprocess.run and filesystem interactions, covering success, failure, timeout, and missing binary cases. Include notes on making this stable in CI where Node/repomix may not be installed.",
+        "updatedAt": "2025-12-14T02:00:00.623Z"
+      },
+      {
+        "id": "5",
+        "title": "Implement Analysis Engine with Mock Mode",
+        "description": "Create the analysis.py module to wrap LLM API calls for analysis. Include a mock mode for testing and a clear extension point for future API integration.",
+        "details": "Implement `src/metaagent/analysis.py`:\n\n```python\nimport json\nimport httpx\nfrom abc import ABC, abstractmethod\nfrom dataclasses import dataclass\nfrom typing import Protocol\n\n@dataclass\nclass AnalysisResult:\n    summary: str\n    recommendations: list[str]\n    tasks: list[dict]  # Each task: {title, description, priority, files}\n\nclass AnalysisEngine(Protocol):\n    def analyze(self, prompt: str) -> AnalysisResult:\n        \"\"\"Run analysis with rendered prompt and return structured result.\"\"\"\n        ...\n\nclass MockAnalysisEngine:\n    \"\"\"Mock engine for testing without API calls.\"\"\"\n    \n    def analyze(self, prompt: str) -> AnalysisResult:\n        return AnalysisResult(\n            summary='Mock analysis completed. This is a placeholder result.',\n            recommendations=[\n                'Implement core functionality first',\n                'Add comprehensive error handling',\n                'Write unit tests for critical paths'\n            ],\n            tasks=[\n                {'title': 'Sample Task 1', 'description': 'Placeholder task', 'priority': 'high', 'files': []},\n                {'title': 'Sample Task 2', 'description': 'Another placeholder', 'priority': 'medium', 'files': []}\n            ]\n        )\n\nclass PerplexityAnalysisEngine:\n    \"\"\"Perplexity API integration for analysis.\"\"\"\n    \n    def __init__(self, api_key: str, timeout: int = 120):\n        self.api_key = api_key\n        self.timeout = timeout\n        self.base_url = 'https://api.perplexity.ai'\n    \n    def analyze(self, prompt: str) -> AnalysisResult:\n        \"\"\"Extension point for LLM analysis calls.\"\"\"\n        headers = {\n            'Authorization': f'Bearer {self.api_key}',\n            'Content-Type': 'application/json'\n        }\n        \n        payload = {\n            'model': 'llama-3.1-sonar-large-128k-online',\n            'messages': [\n                {'role': 'system', 'content': 'You are a code analysis expert. Always respond with valid JSON containing keys: summary, recommendations, tasks.'},\n                {'role': 'user', 'content': prompt}\n            ]\n        }\n        \n        with httpx.Client(timeout=self.timeout) as client:\n            response = client.post(\n                f'{self.base_url}/chat/completions',\n                headers=headers,\n                json=payload\n            )\n            response.raise_for_status()\n            data = response.json()\n        \n        content = data['choices'][0]['message']['content']\n        return self._parse_response(content)\n    \n    def _parse_response(self, content: str) -> AnalysisResult:\n        \"\"\"Parse JSON response from LLM.\"\"\"\n        try:\n            # Try to extract JSON from response\n            parsed = json.loads(content)\n        except json.JSONDecodeError:\n            # Fallback: try to find JSON block\n            import re\n            match = re.search(r'```json\\s*(.+?)\\s*```', content, re.DOTALL)\n            if match:\n                parsed = json.loads(match.group(1))\n            else:\n                return AnalysisResult(\n                    summary=content[:500],\n                    recommendations=[],\n                    tasks=[]\n                )\n        \n        return AnalysisResult(\n            summary=parsed.get('summary', ''),\n            recommendations=parsed.get('recommendations', []),\n            tasks=parsed.get('tasks', [])\n        )\n\ndef create_analysis_engine(api_key: str | None, use_mock: bool = False) -> AnalysisEngine:\n    \"\"\"Factory function to create appropriate analysis engine.\"\"\"\n    if use_mock or not api_key:\n        return MockAnalysisEngine()\n    return PerplexityAnalysisEngine(api_key)\n```",
+        "testStrategy": "Unit tests in `tests/test_analysis.py`:\n1. Test MockAnalysisEngine.analyze() returns valid AnalysisResult\n2. Test create_analysis_engine() returns mock when use_mock=True\n3. Test create_analysis_engine() returns mock when api_key is None\n4. Test _parse_response() with valid JSON\n5. Test _parse_response() with JSON in code block\n6. Test _parse_response() with invalid JSON (fallback)\n7. Integration test with real Perplexity API (optional, mark as integration, skip in CI)",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2",
+          "3"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define AnalysisResult dataclass and AnalysisEngine protocol in analysis.py",
+            "description": "Create the AnalysisResult dataclass and AnalysisEngine protocol to formalize structured analysis outputs and the engine interface.",
+            "dependencies": [],
+            "details": "Implement AnalysisResult with fields: summary: str, recommendations: list[str], tasks: list[dict] where each task dict includes at least title, description, priority, files. Define an AnalysisEngine Protocol with a single method analyze(self, prompt: str) -> AnalysisResult and a clear docstring describing its contract as the extension point for different LLM providers.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement MockAnalysisEngine with deterministic analyze() output",
+            "description": "Create MockAnalysisEngine that implements AnalysisEngine and returns fixed, deterministic results for tests.",
+            "dependencies": [
+              1
+            ],
+            "details": "Add MockAnalysisEngine class with analyze(self, prompt: str) -> AnalysisResult returning a constant AnalysisResult instance matching the provided example values so tests can rely on stable outputs. Ensure it does not perform any network calls or depend on external state. Keep implementation simple and side-effect free so unit tests can assert exact summaries, recommendations, and tasks.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement PerplexityAnalysisEngine HTTP client with secure configuration",
+            "description": "Create PerplexityAnalysisEngine that calls the Perplexity API using httpx with proper headers, payload, timeout, and error handling while avoiding API key leaks.",
+            "dependencies": [
+              1
+            ],
+            "details": "Implement __init__(self, api_key: str, timeout: int = 120) storing api_key, timeout, and base_url. Implement analyze(self, prompt: str) -> AnalysisResult using httpx.Client with configured timeout to POST to /chat/completions. Build headers including Authorization: Bearer <api_key> and Content-Type: application/json, and construct the payload with the specified model and system/user messages. Call response.raise_for_status() to surface HTTP errors, then parse JSON and extract the LLM message content. Never log or print the raw api_key, and avoid logging full request/response bodies that may contain sensitive data; if logging is needed, redact keys and truncate content.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement robust _parse_response() JSON extraction and graceful fallback",
+            "description": "Add private _parse_response() helper on PerplexityAnalysisEngine to convert raw LLM content into AnalysisResult, handling invalid or wrapped JSON safely.",
+            "dependencies": [
+              3
+            ],
+            "details": "Implement _parse_response(self, content: str) -> AnalysisResult that first attempts json.loads(content). On json.JSONDecodeError, search for a ```json ... ``` fenced block via regex, attempt to json.loads on the captured block, and if that also fails, return an AnalysisResult with summary set to a truncated slice of the raw content (e.g., first 500 chars) and empty recommendations and tasks. Ensure missing keys in parsed JSON are handled via .get with sensible defaults. Do not execute or eval any content, and avoid logging full untrusted content; if logging parse failures, log only short snippets or generic error messages to reduce risk of leaking sensitive data.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Implement create_analysis_engine() factory for mock vs real engines",
+            "description": "Create the create_analysis_engine() factory function to choose between MockAnalysisEngine and PerplexityAnalysisEngine based on api_key and use_mock flag.",
+            "dependencies": [
+              2,
+              3
+            ],
+            "details": "Implement create_analysis_engine(api_key: str | None, use_mock: bool = False) -> AnalysisEngine such that it returns MockAnalysisEngine when use_mock is True or when api_key is falsy/None, and returns PerplexityAnalysisEngine(api_key) otherwise. Document this behavior clearly so callers (e.g., configuration/orchestrator) understand how to enable mock mode. Ensure the function does not log API keys and only logs high-level selection decisions if logging is added.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 6,
+            "title": "Write unit tests for analysis engines and JSON parsing with mocked httpx",
+            "description": "Add comprehensive unit tests in tests/test_analysis.py covering mock engine, factory behavior, PerplexityAnalysisEngine HTTP interactions, and JSON parsing fallbacks without real network calls.",
+            "dependencies": [
+              2,
+              3,
+              4,
+              5
+            ],
+            "details": "Create tests verifying: (1) MockAnalysisEngine.analyze() returns an AnalysisResult with expected deterministic fields; (2) create_analysis_engine() returns MockAnalysisEngine when use_mock=True; (3) create_analysis_engine() returns MockAnalysisEngine when api_key is None or empty; (4) _parse_response() correctly parses valid JSON content; (5) _parse_response() extracts JSON from ```json fenced blocks; (6) _parse_response() falls back to truncated summary with empty lists on invalid JSON. Fully mock httpx.Client using monkeypatch or unittest.mock to simulate successful responses, HTTP error responses (ensuring raise_for_status propagates), and malformed model responses where choices/message/content is missing or non-JSON. Assert that no real HTTP requests are made and that error paths do not expose API keys or full sensitive payloads in exception messages or logs if any logging is present.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 7,
+        "recommendedSubtasks": 6,
+        "expansionPrompt": "Break down Task 5 (Implement Analysis Engine with Mock Mode) into 6 subtasks: (1) define AnalysisResult dataclass and AnalysisEngine protocol; (2) implement MockAnalysisEngine with deterministic outputs for tests; (3) implement PerplexityAnalysisEngine HTTP client using httpx, including headers, payload shape, timeout, and error handling; (4) implement _parse_response() to robustly extract JSON from raw content or ```json``` blocks and degrade gracefully on invalid JSON; (5) implement create_analysis_engine() factory with clear rules for mock vs real engine; (6) write unit tests that fully mock httpx.Client to cover success, HTTP errors, malformed model responses, and JSON parse fallbacks, ensuring no real network access. Highlight security considerations around API keys and logging.",
+        "updatedAt": "2025-12-14T02:00:08.782Z"
+      },
+      {
+        "id": "6",
+        "title": "Implement Plan Writer",
+        "description": "Create the plan_writer.py module to generate the mvp_improvement_plan.md file from aggregated analysis results.",
+        "details": "Implement `src/metaagent/plan_writer.py`:\n\n```python\nfrom pathlib import Path\nfrom dataclasses import dataclass\nfrom datetime import datetime\nfrom .analysis import AnalysisResult\n\n@dataclass\nclass StageResult:\n    stage_name: str\n    prompt_id: str\n    result: AnalysisResult\n\nclass PlanWriter:\n    def __init__(self, output_dir: Path):\n        self.output_dir = output_dir\n        self.output_dir.mkdir(parents=True, exist_ok=True)\n    \n    def write_plan(self, prd_content: str, stage_results: list[StageResult], profile_name: str) -> Path:\n        \"\"\"\n        Generate mvp_improvement_plan.md from analysis results.\n        \n        Args:\n            prd_content: Original PRD content\n            stage_results: Results from each analysis stage\n            profile_name: Name of the profile used\n            \n        Returns:\n            Path to the generated plan file\n        \"\"\"\n        output_path = self.output_dir / 'mvp_improvement_plan.md'\n        \n        lines = [\n            '# MVP Improvement Plan',\n            '',\n            f'**Generated:** {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}',\n            f'**Profile:** {profile_name}',\n            '',\n            '---',\n            '',\n            '## PRD Summary',\n            '',\n            self._extract_prd_summary(prd_content),\n            '',\n            '---',\n            ''\n        ]\n        \n        # Add stage summaries\n        lines.append('## Analysis Summaries')\n        lines.append('')\n        for sr in stage_results:\n            lines.append(f'### {sr.stage_name}')\n            lines.append('')\n            lines.append(sr.result.summary)\n            lines.append('')\n            if sr.result.recommendations:\n                lines.append('**Recommendations:**')\n                for rec in sr.result.recommendations:\n                    lines.append(f'- {rec}')\n                lines.append('')\n        \n        # Aggregate and prioritize tasks\n        lines.append('---')\n        lines.append('')\n        lines.append('## Prioritized Task List')\n        lines.append('')\n        lines.append('Complete tasks in order. Check off as completed.')\n        lines.append('')\n        \n        all_tasks = self._aggregate_tasks(stage_results)\n        for i, task in enumerate(all_tasks, 1):\n            priority_badge = self._priority_badge(task.get('priority', 'medium'))\n            lines.append(f'- [ ] **{i}. {task[\"title\"]}** {priority_badge}')\n            lines.append(f'  - {task[\"description\"]}')\n            if task.get('files'):\n                lines.append(f'  - Files: {\", \".join(task[\"files\"])}')\n            lines.append('')\n        \n        # Claude Code instruction block\n        lines.extend(self._claude_code_instructions())\n        \n        output_path.write_text('\\n'.join(lines), encoding='utf-8')\n        return output_path\n    \n    def _extract_prd_summary(self, prd_content: str) -> str:\n        \"\"\"Extract first 500 chars as summary.\"\"\"\n        lines = prd_content.strip().split('\\n')\n        summary_lines = []\n        char_count = 0\n        for line in lines:\n            if char_count + len(line) > 500:\n                break\n            summary_lines.append(line)\n            char_count += len(line)\n        return '\\n'.join(summary_lines) + '...'\n    \n    def _aggregate_tasks(self, stage_results: list[StageResult]) -> list[dict]:\n        \"\"\"Aggregate tasks from all stages, sorted by priority.\"\"\"\n        all_tasks = []\n        for sr in stage_results:\n            all_tasks.extend(sr.result.tasks)\n        \n        priority_order = {'high': 0, 'medium': 1, 'low': 2}\n        return sorted(all_tasks, key=lambda t: priority_order.get(t.get('priority', 'medium'), 1))\n    \n    def _priority_badge(self, priority: str) -> str:\n        badges = {'high': '🔴', 'medium': '🟡', 'low': '🟢'}\n        return badges.get(priority, '🟡')\n    \n    def _claude_code_instructions(self) -> list[str]:\n        return [\n            '---',\n            '',\n            '## Instructions for Claude Code',\n            '',\n            '1. Read this entire document before starting',\n            '2. Work through tasks in order, checking off each as completed',\n            '3. Run tests after each significant change',\n            '4. Commit changes incrementally with descriptive messages',\n            '5. If blocked, document the blocker and move to the next task',\n            ''\n        ]\n```",
+        "testStrategy": "Unit tests in `tests/test_plan_writer.py`:\n1. Test write_plan() creates file at expected path\n2. Test output contains PRD summary section\n3. Test output contains stage summaries for all stages\n4. Test tasks are aggregated and sorted by priority\n5. Test Claude Code instruction block is included\n6. Test _priority_badge() returns correct emojis\n7. Test with empty stage_results list",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "5"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define StageResult dataclass and PlanWriter constructor",
+            "description": "Implement the basic class structure with StageResult dataclass and PlanWriter __init__ that creates output directory.",
+            "dependencies": [],
+            "details": "Create src/metaagent/plan_writer.py with imports (Path, dataclass, datetime, AnalysisResult), define StageResult with stage_name, prompt_id, result fields, and PlanWriter __init__ that sets self.output_dir and calls mkdir(parents=True, exist_ok=True).",
+            "status": "pending",
+            "testStrategy": "Test StageResult instantiation with sample data and PlanWriter __init__ creates directory using tmp_path fixture.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement write_plan() method with Markdown sections",
+            "description": "Create the main write_plan method that assembles metadata, PRD summary, stage summaries, prioritized tasks, and Claude instructions into mvp_improvement_plan.md.",
+            "dependencies": [
+              1
+            ],
+            "details": "Implement write_plan(prd_content, stage_results, profile_name) that builds lines list with header, timestamp/profile metadata, PRD summary call, stage summaries loop, prioritized tasks section with _aggregate_tasks call, and _claude_code_instructions, then writes UTF-8 file.",
+            "status": "pending",
+            "testStrategy": "Test file creation at expected path, verify all sections present in output (header, metadata, PRD summary, stage summaries, tasks, instructions) using file content assertions.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement _extract_prd_summary with line-aware truncation",
+            "description": "Create helper method to extract first ~500 characters of PRD content while preserving complete lines and adding ellipsis.",
+            "dependencies": [
+              1
+            ],
+            "details": "Implement _extract_prd_summary(prd_content) that splits by lines, accumulates until 500 char limit, joins lines, appends '...' for truncation. Handle empty/whitespace PRD gracefully.",
+            "status": "pending",
+            "testStrategy": "Test truncation at ~500 chars preserves lines, test short content returns full, test empty PRD returns empty string or minimal output.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement task aggregation and priority utilities",
+            "description": "Add _aggregate_tasks to collect/sort tasks by priority and _priority_badge for emoji mapping.",
+            "dependencies": [
+              1
+            ],
+            "details": "Implement _aggregate_tasks(stage_results) that flattens all tasks and sorts by priority_order={'high':0,'medium':1,'low':2}, _priority_badge(priority) mapping to emojis (🔴🟡🟢). Ensure UTF-8 compatibility for emojis.",
+            "status": "pending",
+            "testStrategy": "Test task aggregation collects from multiple stages, verify priority sorting (high>medium>low), test badge emojis render correctly in UTF-8 output.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Write comprehensive unit tests for PlanWriter",
+            "description": "Create tests/test_plan_writer.py with pytest tests covering file creation, content sections, priority sorting, edge cases.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "Use tmp_path fixture to test: file creation/path, all Markdown sections present, stage summaries rendered, tasks sorted by priority, empty tasks/stages handled, UTF-8 emoji encoding, PRD truncation. Mock AnalysisResult and StageResult.",
+            "status": "pending",
+            "testStrategy": "Run pytest with coverage: verify 100% pass rate, test empty inputs (no stages/no tasks), mixed priorities, long PRD truncation, Unicode emoji preservation in output file.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 5,
+        "recommendedSubtasks": 5,
+        "expansionPrompt": "Break down Task 6 (Implement Plan Writer) into 5 subtasks: (1) define StageResult dataclass and PlanWriter constructor creating output_dir; (2) implement write_plan() to assemble sections (metadata, PRD summary, stage summaries, prioritized tasks, instructions) into Markdown; (3) implement _extract_prd_summary() with length limits and line-aware truncation; (4) implement _aggregate_tasks() and _priority_badge() with clear priority ordering and emoji mapping; (5) write unit tests using tmp_path to verify file creation, content sections, priority sorting, and behavior with empty tasks/stages. Note any i18n/encoding considerations for emojis and UTF-8 writes.",
+        "updatedAt": "2025-12-14T02:00:13.300Z"
+      },
+      {
+        "id": "7",
+        "title": "Implement Orchestrator",
+        "description": "Create the orchestrator.py module that coordinates the entire refinement workflow: loading config, running stages, calling analysis engine, and generating the plan.",
+        "details": "Implement `src/metaagent/orchestrator.py`:\n\n```python\nimport logging\nfrom pathlib import Path\nfrom dataclasses import dataclass, field\nfrom datetime import datetime\n\nfrom .config import Config\nfrom .prompts import PromptLibrary, Prompt\nfrom .repomix import RepomixRunner, RepomixResult\nfrom .analysis import create_analysis_engine, AnalysisResult\nfrom .plan_writer import PlanWriter, StageResult\n\nlogger = logging.getLogger(__name__)\n\n@dataclass\nclass RunHistory:\n    \"\"\"Tracks analysis history for context in subsequent stages.\"\"\"\n    entries: list[dict] = field(default_factory=list)\n    \n    def add(self, stage: str, summary: str):\n        self.entries.append({\n            'stage': stage,\n            'timestamp': datetime.now().isoformat(),\n            'summary': summary\n        })\n    \n    def to_string(self) -> str:\n        if not self.entries:\n            return 'No previous analysis.'\n        lines = ['Previous analysis results:']\n        for entry in self.entries:\n            lines.append(f\"\\n## {entry['stage']} ({entry['timestamp']})\")\n            lines.append(entry['summary'])\n        return '\\n'.join(lines)\n\n@dataclass  \nclass RefinementResult:\n    success: bool\n    plan_path: Path | None\n    stage_results: list[StageResult]\n    errors: list[str]\n\nclass Orchestrator:\n    def __init__(self, config: Config, use_mock: bool = False):\n        self.config = config\n        self.use_mock = use_mock\n        self.prompt_library = PromptLibrary(config.config_dir)\n        self.repomix = RepomixRunner(timeout=config.timeout)\n        self.analysis_engine = create_analysis_engine(\n            config.perplexity_api_key,\n            use_mock=use_mock\n        )\n        self.plan_writer = PlanWriter(config.output_dir)\n        self.history = RunHistory()\n    \n    def refine(self, profile_name: str) -> RefinementResult:\n        \"\"\"\n        Run the full refinement workflow for the given profile.\n        \n        Args:\n            profile_name: Name of the profile to use\n            \n        Returns:\n            RefinementResult with success status and plan path\n        \"\"\"\n        errors = []\n        stage_results = []\n        \n        # Validate profile exists\n        profile = self.prompt_library.get_profile(profile_name)\n        if not profile:\n            available = self.prompt_library.list_profiles()\n            return RefinementResult(\n                success=False,\n                plan_path=None,\n                stage_results=[],\n                errors=[f'Profile \"{profile_name}\" not found. Available: {available}']\n            )\n        \n        logger.info(f'Starting refinement with profile: {profile_name}')\n        \n        # Load PRD\n        prd_content = self._load_prd()\n        if not prd_content:\n            return RefinementResult(\n                success=False,\n                plan_path=None,\n                stage_results=[],\n                errors=[f'PRD not found at {self.config.prd_path}']\n            )\n        \n        # Run Repomix\n        logger.info('Packing codebase with Repomix...')\n        repomix_result = self.repomix.pack(self.config.repo_path)\n        if not repomix_result.success:\n            errors.append(f'Repomix warning: {repomix_result.error}')\n            code_context = '[Repomix failed - limited code context available]'\n        else:\n            code_context = self.repomix.truncate_content(\n                repomix_result.content,\n                self.config.max_tokens\n            )\n        \n        # Run each stage\n        prompts = self.prompt_library.get_prompts_for_profile(profile_name)\n        for prompt in prompts:\n            logger.info(f'Running stage: {prompt.id}')\n            try:\n                result = self._run_stage(prompt, prd_content, code_context)\n                stage_results.append(StageResult(\n                    stage_name=prompt.id,\n                    prompt_id=prompt.id,\n                    result=result\n                ))\n                self.history.add(prompt.id, result.summary)\n            except Exception as e:\n                logger.error(f'Stage {prompt.id} failed: {e}')\n                errors.append(f'Stage {prompt.id} failed: {str(e)}')\n        \n        # Generate plan\n        if stage_results:\n            logger.info('Generating improvement plan...')\n            plan_path = self.plan_writer.write_plan(\n                prd_content,\n                stage_results,\n                profile_name\n            )\n            logger.info(f'Plan written to {plan_path}')\n        else:\n            plan_path = None\n            errors.append('No stages completed successfully')\n        \n        return RefinementResult(\n            success=len(errors) == 0,\n            plan_path=plan_path,\n            stage_results=stage_results,\n            errors=errors\n        )\n    \n    def _load_prd(self) -> str | None:\n        if self.config.prd_path.exists():\n            return self.config.prd_path.read_text(encoding='utf-8')\n        return None\n    \n    def _run_stage(self, prompt: Prompt, prd: str, code_context: str) -> AnalysisResult:\n        rendered = prompt.render(\n            prd=prd,\n            code_context=code_context,\n            history=self.history.to_string(),\n            current_stage=prompt.id\n        )\n        return self.analysis_engine.analyze(rendered)\n```",
+        "testStrategy": "Unit tests in `tests/test_orchestrator.py`:\n1. Test refine() with valid profile returns success\n2. Test refine() with invalid profile returns error\n3. Test refine() with missing PRD returns error\n4. Test refine() continues after Repomix failure with warning\n5. Test stages are run in profile order\n6. Test history is accumulated across stages\n7. Test plan is generated after successful stages\n8. Use MockAnalysisEngine and mock Repomix for isolation",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "3",
+          "4",
+          "5",
+          "6"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define RunHistory and RefinementResult dataclasses",
+            "description": "Implement RunHistory class with add() and to_string() methods, and RefinementResult dataclass for workflow results.",
+            "dependencies": [],
+            "details": "Use @dataclass with field(default_factory=list) for RunHistory.entries. Implement timestamped history tracking and string formatting for prompt context. RefinementResult holds success flag, plan_path, stage_results list, and errors list.",
+            "status": "pending",
+            "testStrategy": "Test RunHistory.add() appends correctly, to_string() formats multi-entry history, empty history returns 'No previous analysis.' Test RefinementResult instantiation and field access.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement Orchestrator.__init__ dependency wiring",
+            "description": "Wire Config, PromptLibrary, RepomixRunner, analysis_engine factory, PlanWriter, and RunHistory in constructor.",
+            "dependencies": [
+              1
+            ],
+            "details": "Initialize self.config, self.prompt_library(config.config_dir), self.repomix(config.timeout), self.analysis_engine=create_analysis_engine(config.perplexity_api_key, use_mock), self.plan_writer(config.output_dir), self.history=RunHistory(). Support use_mock flag.",
+            "status": "pending",
+            "testStrategy": "Mock all dependencies, verify __init__ passes correct params to each component, test use_mock=True creates mock analysis engine.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement _load_prd() with file existence check",
+            "description": "Load PRD content from config.prd_path with clear None return on missing file.",
+            "dependencies": [
+              2
+            ],
+            "details": "Use self.config.prd_path.exists() check, read_text(encoding='utf-8') on success, return None on failure. No exceptions, clean failure path for orchestrator.",
+            "status": "pending",
+            "testStrategy": "Mock Path.exists()=False returns None, mock Path.read_text() returns content, verify encoding handling.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement Repomix integration in refine()",
+            "description": "Run repomix.pack(), handle failure with warning, truncate content if successful.",
+            "dependencies": [
+              2,
+              3
+            ],
+            "details": "Call self.repomix.pack(self.config.repo_path), on failure set code_context='[Repomix failed...]', on success truncate with self.repomix.truncate_content(result.content, self.config.max_tokens). Log progress.",
+            "status": "pending",
+            "testStrategy": "Mock repomix.pack() success with long content (verify truncation), mock failure (verify warning context), verify logging calls.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Implement stage execution loop with history",
+            "description": "Fetch prompts for profile, render each with history/PRD/code_context, run analysis, accumulate StageResult, update history.",
+            "dependencies": [
+              1,
+              2,
+              4
+            ],
+            "details": "Get prompts = self.prompt_library.get_prompts_for_profile(profile_name), loop: render=prompt.render(prd, code_context, history=self.history.to_string(), current_stage=prompt.id), result=self.analysis_engine.analyze(rendered), create StageResult, self.history.add(). Catch exceptions per stage.",
+            "status": "pending",
+            "testStrategy": "Mock prompt_library.get_prompts_for_profile() returns 2 prompts, verify sequential execution, history updates after each stage, StageResult list accumulates correctly, partial failure continues.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 6,
+            "title": "Implement plan generation and RefinementResult",
+            "description": "Generate plan if stages succeeded, assemble final RefinementResult with success/errors semantics.",
+            "dependencies": [
+              1,
+              2,
+              5
+            ],
+            "details": "After stage loop, if stage_results: plan_path=self.plan_writer.write_plan(prd_content, stage_results, profile_name), else plan_path=None. Return RefinementResult(success=len(errors)==0, plan_path, stage_results, errors). Early returns for profile/PRD validation.",
+            "status": "pending",
+            "testStrategy": "Mock plan_writer.write_plan() returns Path, verify success=True when errors=[], success=False with errors, test no-stages-empty-results case.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 7,
+            "title": "Write comprehensive unit tests for Orchestrator",
+            "description": "Create tests/test_orchestrator.py with heavy mocking covering all paths: success, missing profile/PRD, Repomix/stage failures.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "details": "Use pytest, unittest.mock: Mock PromptLibrary.get_profile()/get_prompts_for_profile(), RepomixRunner.pack(), create_analysis_engine(), PlanWriter.write_plan(). Test 10+ scenarios: valid profile success path, invalid profile early return, missing PRD, Repomix fail continues, stage exceptions accumulate, history chaining, empty profile prompts.",
+            "status": "pending",
+            "testStrategy": "Aim for 90%+ coverage. Verify orchestration logic isolation from I/O. Test history.to_string() called sequentially, StageResult.prompt_id==stage_name consistency, error accumulation without crashing.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 8,
+        "recommendedSubtasks": 7,
+        "expansionPrompt": "Break down Task 7 (Implement Orchestrator) into 7 subtasks: (1) define RunHistory and RefinementResult data structures; (2) implement Orchestrator.__init__ wiring Config, PromptLibrary, RepomixRunner, AnalysisEngine factory, and PlanWriter; (3) implement _load_prd() with clear failure behavior; (4) implement Repomix integration inside refine(), including warning handling and context truncation; (5) implement stage loop: fetching prompts for a profile, rendering with history, invoking analysis, accumulating StageResult, and updating RunHistory; (6) implement plan generation and final RefinementResult assembly with success/error semantics; (7) write unit tests that heavily mock PromptLibrary, RepomixRunner, and AnalysisEngine to cover success path, missing profile, missing PRD, Repomix failures, partial stage failures, history accumulation, and no-stages cases. Emphasize separation of orchestration logic from I/O for testability.",
+        "updatedAt": "2025-12-14T02:00:17.617Z"
+      },
+      {
+        "id": "8",
+        "title": "Implement CLI Entrypoint",
+        "description": "Create the CLI using Typer with the `metaagent refine` command that validates arguments and invokes the orchestrator.",
+        "details": "Implement `src/metaagent/cli.py`:\n\n```python\nimport sys\nimport logging\nfrom pathlib import Path\nfrom typing import Optional\n\nimport typer\nfrom rich.console import Console\nfrom rich.logging import RichHandler\n\nfrom .config import Config\nfrom .orchestrator import Orchestrator\nfrom .prompts import PromptLibrary\n\napp = typer.Typer(\n    name='metaagent',\n    help='Meta-agent for automated codebase refinement from v0 to MVP'\n)\nconsole = Console()\n\ndef setup_logging(level: str):\n    logging.basicConfig(\n        level=level,\n        format='%(message)s',\n        handlers=[RichHandler(rich_tracebacks=True)]\n    )\n\n@app.command()\ndef refine(\n    profile: str = typer.Option(\n        ...,\n        '--profile', '-p',\n        help='Profile to use for refinement (e.g., automation_agent, backend_service)'\n    ),\n    repo: Path = typer.Option(\n        Path('.'),\n        '--repo', '-r',\n        help='Path to the repository to refine'\n    ),\n    prd: Optional[Path] = typer.Option(\n        None,\n        '--prd',\n        help='Path to PRD file (default: docs/prd.md in repo)'\n    ),\n    mock: bool = typer.Option(\n        False,\n        '--mock',\n        help='Use mock analysis engine (no API calls)'\n    ),\n    verbose: bool = typer.Option(\n        False,\n        '--verbose', '-v',\n        help='Enable verbose output'\n    )\n):\n    \"\"\"\n    Refine a codebase from v0 to MVP using automated analysis and planning.\n    \n    Example:\n        metaagent refine --profile automation_agent --repo /path/to/repo\n    \"\"\"\n    # Setup logging\n    log_level = 'DEBUG' if verbose else 'INFO'\n    setup_logging(log_level)\n    \n    # Resolve paths\n    repo_path = repo.resolve()\n    if not repo_path.exists():\n        console.print(f'[red]Error: Repository path does not exist: {repo_path}[/red]')\n        raise typer.Exit(1)\n    \n    # Load config\n    config = Config.from_env(repo_path)\n    if prd:\n        config.prd_path = prd.resolve()\n    \n    # Validate config\n    errors = config.validate()\n    if errors:\n        for err in errors:\n            console.print(f'[red]Configuration error: {err}[/red]')\n        raise typer.Exit(1)\n    \n    # Show available profiles if requested profile doesn't exist\n    prompt_library = PromptLibrary(config.config_dir)\n    if not prompt_library.get_profile(profile):\n        available = prompt_library.list_profiles()\n        console.print(f'[red]Error: Profile \"{profile}\" not found.[/red]')\n        console.print(f'Available profiles: {available}')\n        raise typer.Exit(1)\n    \n    # Run refinement\n    console.print(f'[bold blue]Starting refinement...[/bold blue]')\n    console.print(f'  Profile: {profile}')\n    console.print(f'  Repository: {repo_path}')\n    console.print(f'  Mock mode: {mock}')\n    console.print()\n    \n    orchestrator = Orchestrator(config, use_mock=mock)\n    result = orchestrator.refine(profile)\n    \n    # Report results\n    if result.success:\n        console.print('[bold green]Refinement completed successfully![/bold green]')\n        console.print(f'Plan written to: {result.plan_path}')\n    else:\n        console.print('[bold yellow]Refinement completed with warnings:[/bold yellow]')\n        for err in result.errors:\n            console.print(f'  - {err}')\n        if result.plan_path:\n            console.print(f'Plan written to: {result.plan_path}')\n    \n    console.print(f'\\nStages completed: {len(result.stage_results)}')\n\n@app.command()\ndef list_profiles(\n    config_dir: Optional[Path] = typer.Option(\n        None,\n        '--config-dir', '-c',\n        help='Path to config directory'\n    )\n):\n    \"\"\"List available refinement profiles.\"\"\"\n    config = Config.from_env()\n    if config_dir:\n        config.config_dir = config_dir.resolve()\n    \n    prompt_library = PromptLibrary(config.config_dir)\n    profiles = prompt_library.list_profiles()\n    \n    if not profiles:\n        console.print('[yellow]No profiles found.[/yellow]')\n        return\n    \n    console.print('[bold]Available Profiles:[/bold]')\n    for name in profiles:\n        profile = prompt_library.get_profile(name)\n        console.print(f'  {name}: {profile.description}')\n        console.print(f'    Stages: {profile.stages}')\n\ndef main():\n    app()\n\nif __name__ == '__main__':\n    main()\n```\n\nAdd to `src/metaagent/__init__.py`:\n```python\n__version__ = '0.1.0'\n```",
+        "testStrategy": "Unit tests in `tests/test_cli.py`:\n1. Test `refine` command with valid args using CliRunner\n2. Test `refine` command fails gracefully with invalid profile\n3. Test `refine` command fails gracefully with non-existent repo\n4. Test `list-profiles` command outputs available profiles\n5. Test `--mock` flag passes through to orchestrator\n6. Test `--verbose` flag sets logging level correctly\n7. Test help text is displayed with `--help`",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "7"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define Typer app, main() entrypoint, and package __version__",
+            "description": "Create the Typer application object, wire up the main() entrypoint compatible with the pyproject console_script, and expose the package version in __init__.py.",
+            "dependencies": [],
+            "details": "Implement src/metaagent/cli.py with a module-level typer.Typer instance (name='metaagent') and a main() function that calls app(), suitable for use as the console_script entrypoint. Ensure __init__.py defines __version__ = '0.1.0' and that the CLI module can be imported without side effects beyond defining commands. Confirm the structure aligns with expected project layout so that `metaagent` runs the Typer app when installed.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement logging setup using RichHandler with configurable levels",
+            "description": "Add a reusable logging setup function that configures logging with RichHandler and supports INFO/DEBUG levels via a parameter.",
+            "dependencies": [
+              1
+            ],
+            "details": "In cli.py, implement setup_logging(level: str) that calls logging.basicConfig with RichHandler(rich_tracebacks=True) and a simple message format. Use the provided code skeleton as reference. Ensure that calling setup_logging with 'DEBUG' or 'INFO' correctly changes the global log level and that it does not re-add duplicate handlers on multiple invocations in typical CLI use. Prepare for verbose flag integration in the refine command.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement `refine` command with argument parsing and orchestrator integration",
+            "description": "Create the refine Typer command that parses CLI options, resolves paths, loads and validates config, checks profile existence, calls the orchestrator, and reports results.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Define @app.command() refine(...) with options: --profile/-p (required str), --repo/-r (Path, default '.'), --prd (Optional[Path]), --mock (bool), and --verbose/-v (bool). Inside, set log_level to 'DEBUG' when verbose is True, else 'INFO', and call setup_logging. Resolve repo path; if it does not exist, print a red Rich error message and exit with typer.Exit(1). Call Config.from_env(repo_path) to load configuration, apply prd override if provided, and run config.validate(); on validation errors, print each as a Rich red configuration error and exit 1. Instantiate PromptLibrary with config.config_dir, verify the requested profile exists via get_profile(), and if missing, print a red error plus a list of available profiles before exiting 1. On success, log a blue starting message with profile, repo, and mock mode. Create Orchestrator(config, use_mock=mock), call orchestrator.refine(profile), and then print green success output with plan path on success, or yellow warnings listing each error and plan path when present. Always print the count of completed stages at the end.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement `list_profiles` command with optional config_dir override",
+            "description": "Add the list_profiles Typer command that loads configuration, applies an optional config directory override, and prints available profiles using PromptLibrary.",
+            "dependencies": [
+              1,
+              3
+            ],
+            "details": "Define @app.command() list_profiles(config_dir: Optional[Path] = Option(None, '--config-dir', '-c', ...)). Inside, call Config.from_env() with default parameters, and if config_dir is provided, resolve it and assign to config.config_dir. Instantiate PromptLibrary(config.config_dir), call list_profiles(), and if the list is empty print a yellow notice and return without error. Otherwise, print a bold header and for each profile name, fetch the profile object with get_profile(name) and print its description and stages in a readable, indented format using Rich markup. Ensure this command exits with code 0 on normal completion.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Ensure consistent CLI error handling and exit codes with Rich messages",
+            "description": "Review and refine CLI error handling so that all failure scenarios return appropriate exit codes and user-friendly Rich-formatted messages.",
+            "dependencies": [
+              3,
+              4
+            ],
+            "details": "Audit refine and list_profiles commands to make sure all early-return error states use typer.Exit with non-zero codes (e.g., 1) for invalid repo paths, configuration validation failures, missing profiles, and other user errors, while successful paths exit with 0. Standardize Rich output styles for errors (red), warnings (yellow), and success (green/blue). Confirm no unhandled exceptions leak to the user in common failure scenarios, and that messages remain concise and informative across platforms. Avoid using sys.exit directly; rely on typer.Exit for consistency.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 6,
+            "title": "Write CLI tests with typer.testing.CliRunner covering success and failure paths",
+            "description": "Create comprehensive tests for the CLI using CliRunner to exercise refine and list_profiles commands across success, failure, mock, verbose, and help scenarios without hitting real external APIs or subprocesses.",
+            "dependencies": [
+              2,
+              3,
+              4,
+              5
+            ],
+            "details": "In tests/test_cli.py, instantiate CliRunner and write tests that invoke the Typer app (e.g., runner.invoke(cli.app, [...])). Cover: (a) successful refine with valid args, mocking Config.from_env, PromptLibrary, and Orchestrator to avoid real file system, APIs, or subprocesses; (b) refine with invalid profile, ensuring proper error message and non-zero exit code; (c) refine with non-existent repo path, checking path handling is cross-platform safe (e.g., using tmp_path / 'missing'); (d) refine with --mock and --verbose ensuring they alter behavior/log level and output; (e) list_profiles showing available profiles, using mocked PromptLibrary; and (f) help text for top-level and refine/list_profiles commands. Use monkeypatch or similar to inject test doubles, and assert output strings and exit codes without relying on actual environment variables or network calls.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 6,
+        "recommendedSubtasks": 6,
+        "expansionPrompt": "Break down Task 8 (Implement CLI Entrypoint) into 6 subtasks: (1) set up Typer app structure and main() entrypoint compatible with pyproject console_script; (2) implement logging setup with RichHandler and configurable levels; (3) implement refine command: argument parsing, repo path resolution, Config.from_env usage, optional PRD override, config validation, profile existence check, orchestrator invocation, and result reporting; (4) implement list_profiles command: config_dir override, PromptLibrary usage, and formatted output; (5) ensure CLI error handling exits with proper codes and user-friendly Rich messages; (6) write tests using typer.testing.CliRunner that exercise success and failure paths, mock mode, verbose flag, invalid repo/profile, and help text. Note cross-platform path considerations and how to avoid hitting real APIs/subprocesses in tests.",
+        "updatedAt": "2025-12-14T02:00:22.408Z"
+      },
+      {
+        "id": "9",
+        "title": "Create Complete Configuration Files",
+        "description": "Populate config/prompts.yaml and config/profiles.yaml with all prompt templates and profile definitions from the PRD.",
+        "details": "Create `config/prompts.yaml` with exact content from PRD Section 7.1:\n\n```yaml\nprompts:\n  alignment_with_prd:\n    id: alignment_with_prd\n    goal: \"Identify gaps between current implementation and PRD requirements\"\n    stage: alignment\n    template: |\n      You are analyzing a codebase against its PRD.\n\n      ## PRD:\n      {{prd}}\n\n      ## Current Codebase:\n      {{code_context}}\n\n      ## Previous Analysis (if any):\n      {{history}}\n\n      Current Stage: {{current_stage}}\n\n      Please analyze and provide:\n      1. Summary of alignment gaps\n      2. Missing features or incomplete implementations\n      3. Prioritized task list to close gaps\n\n      Format your response as JSON with keys: summary, recommendations, tasks\n\n  architecture_sanity:\n    id: architecture_sanity\n    goal: \"Review architecture for best practices and maintainability\"\n    stage: architecture\n    template: |\n      Review this codebase for architectural quality.\n\n      ## PRD Context:\n      {{prd}}\n\n      ## Codebase:\n      {{code_context}}\n\n      Analyze:\n      1. Code organization and modularity\n      2. Separation of concerns\n      3. Error handling patterns\n      4. Dependency management\n\n      Format your response as JSON with keys: summary, recommendations, tasks\n\n  core_flow_hardening:\n    id: core_flow_hardening\n    goal: \"Identify robustness improvements for core flows\"\n    stage: hardening\n    template: |\n      Analyze core flows for robustness.\n\n      ## PRD:\n      {{prd}}\n\n      ## Codebase:\n      {{code_context}}\n\n      ## Analysis History:\n      {{history}}\n\n      Focus on:\n      1. Error handling and recovery\n      2. Retry logic for external calls\n      3. Input validation\n      4. Edge cases\n\n      Format your response as JSON with keys: summary, recommendations, tasks\n\n  test_suite_mvp:\n    id: test_suite_mvp\n    goal: \"Identify critical tests needed for MVP quality\"\n    stage: testing\n    template: |\n      Review test coverage for this codebase.\n\n      ## PRD:\n      {{prd}}\n\n      ## Codebase:\n      {{code_context}}\n\n      Identify:\n      1. Missing unit tests for core functions\n      2. Missing integration tests for main flows\n      3. Edge cases without test coverage\n\n      Format your response as JSON with keys: summary, recommendations, tasks\n```\n\nCreate `config/profiles.yaml` with content from PRD Section 7.2:\n\n```yaml\nprofiles:\n  automation_agent:\n    name: \"Automation Agent\"\n    description: \"Profile for CLI tools and automation agents\"\n    stages:\n      - alignment_with_prd\n      - architecture_sanity\n      - core_flow_hardening\n      - test_suite_mvp\n\n  backend_service:\n    name: \"Backend Service\"\n    description: \"Profile for API backends and services\"\n    stages:\n      - alignment_with_prd\n      - architecture_sanity\n      - core_flow_hardening\n      - test_suite_mvp\n\n  internal_tool:\n    name: \"Internal Tool\"\n    description: \"Profile for internal developer tools\"\n    stages:\n      - alignment_with_prd\n      - core_flow_hardening\n```",
+        "testStrategy": "Validation tests:\n1. Validate prompts.yaml is valid YAML and parses correctly\n2. Validate profiles.yaml is valid YAML and parses correctly\n3. Test PromptLibrary loads all 4 prompts\n4. Test PromptLibrary loads all 3 profiles\n5. Test each prompt template renders without Jinja errors\n6. Verify all stages referenced in profiles exist in prompts",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "3"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Author config/prompts.yaml with PRD templates",
+            "description": "Create prompts.yaml file with all 4 prompt templates from PRD Section 7.1 including required Jinja placeholders",
+            "dependencies": [],
+            "details": "Copy exact content for alignment_with_prd, architecture_sanity, core_flow_hardening, test_suite_mvp prompts. Ensure all templates include {{prd}}, {{code_context}}, {{history}}, {{current_stage}} placeholders where appropriate. Verify YAML indentation and structure.",
+            "status": "pending",
+            "testStrategy": "Validate YAML parses correctly, check all 4 prompts load via PromptLibrary, test Jinja rendering with sample context for each template",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Author config/profiles.yaml with complete profiles",
+            "description": "Create profiles.yaml with all 3 profiles and their stage sequences from PRD Section 7.2",
+            "dependencies": [
+              1
+            ],
+            "details": "Implement automation_agent, backend_service, internal_tool profiles with exact stage sequences. Ensure all referenced stage IDs exist in prompts.yaml (alignment_with_prd, architecture_sanity, core_flow_hardening, test_suite_mvp). Keep configs environment-agnostic.",
+            "status": "pending",
+            "testStrategy": "Validate YAML parses correctly, verify PromptLibrary loads all 3 profiles, check referential integrity between profiles.stages and prompts keys",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement validation tests for config files",
+            "description": "Write tests/test_prompts.py to validate both YAML files load correctly and maintain integrity",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Create pytest suite that: 1) Loads both YAML files via PromptLibrary, 2) Asserts 4 prompts and 3 profiles found, 3) Tests all prompt templates render without Jinja errors using mock context, 4) Verifies profile stage references exist in prompts, 5) Uses relative paths for CI compatibility.",
+            "status": "pending",
+            "testStrategy": "Run pytest tests/test_prompts.py. Should pass: YAML parsing, prompt/profile counts, template renderability, referential integrity checks. Tests must work in CI without environment-specific paths.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 3,
+        "recommendedSubtasks": 3,
+        "expansionPrompt": "Break down Task 9 (Create Complete Configuration Files) into 3 subtasks: (1) author prompts.yaml exactly per PRD, adding required Jinja placeholders (prd, code_context, history, current_stage) and validate formatting; (2) author profiles.yaml with all profiles and stage sequences, ensuring all referenced stages exist in prompts.yaml; (3) write small validation tests or scripts (e.g., in tests/test_prompts.py) to load both YAML files via PromptLibrary and assert prompt/profile counts, renderability, and referential integrity. Note how to keep these configs environment-agnostic for CI.",
+        "updatedAt": "2025-12-14T02:00:33.045Z"
+      },
+      {
+        "id": "10",
+        "title": "Add Comprehensive Test Suite",
+        "description": "Create a complete test suite covering all modules with unit tests, integration tests, and fixtures for testing.",
+        "details": "Create comprehensive test files with pytest fixtures and mocks:\n\n`tests/conftest.py`:\n```python\nimport pytest\nfrom pathlib import Path\nimport tempfile\nimport shutil\n\n@pytest.fixture\ndef temp_dir():\n    \"\"\"Create a temporary directory for tests.\"\"\"\n    d = Path(tempfile.mkdtemp())\n    yield d\n    shutil.rmtree(d, ignore_errors=True)\n\n@pytest.fixture\ndef sample_prd():\n    return '''# Test PRD\n## Overview\nThis is a test PRD for unit testing.\n## Requirements\n- REQ1: Feature one\n- REQ2: Feature two\n'''\n\n@pytest.fixture\ndef sample_code_context():\n    return '''# Packed Codebase\n## src/main.py\ndef main():\n    print(\"Hello World\")\n'''\n\n@pytest.fixture\ndef mock_prompts_yaml():\n    return '''prompts:\n  test_prompt:\n    id: test_prompt\n    goal: Test goal\n    stage: test\n    template: |\n      PRD: {{prd}}\n      Code: {{code_context}}\n'''\n\n@pytest.fixture\ndef mock_profiles_yaml():\n    return '''profiles:\n  test_profile:\n    name: Test Profile\n    description: For testing\n    stages:\n      - test_prompt\n'''\n\n@pytest.fixture\ndef config_dir(temp_dir, mock_prompts_yaml, mock_profiles_yaml):\n    \"\"\"Create a config directory with test YAML files.\"\"\"\n    config = temp_dir / 'config'\n    config.mkdir()\n    (config / 'prompts.yaml').write_text(mock_prompts_yaml)\n    (config / 'profiles.yaml').write_text(mock_profiles_yaml)\n    return config\n\n@pytest.fixture\ndef test_repo(temp_dir, sample_prd):\n    \"\"\"Create a test repository structure.\"\"\"\n    repo = temp_dir / 'test_repo'\n    repo.mkdir()\n    docs = repo / 'docs'\n    docs.mkdir()\n    (docs / 'prd.md').write_text(sample_prd)\n    (repo / 'src').mkdir()\n    (repo / 'src' / 'main.py').write_text('print(\"hello\")')\n    return repo\n```\n\nTest files to create:\n- `tests/test_config.py` - Config loading and validation\n- `tests/test_prompts.py` - Prompt/profile loading and rendering\n- `tests/test_repomix.py` - Repomix integration with mocked subprocess\n- `tests/test_analysis.py` - Analysis engine with mock and parsing\n- `tests/test_plan_writer.py` - Plan generation\n- `tests/test_orchestrator.py` - Full workflow with mocks\n- `tests/test_cli.py` - CLI commands with typer.testing.CliRunner\n\nEach test file should:\n- Use pytest fixtures from conftest.py\n- Mock external dependencies (subprocess, httpx)\n- Cover happy path and error cases\n- Be runnable with `pytest tests/`",
+        "testStrategy": "Meta-test strategy:\n1. Run `pytest tests/ -v` to execute all tests\n2. Run `pytest tests/ --cov=metaagent --cov-report=html` for coverage\n3. Ensure >80% code coverage\n4. Verify all tests pass in CI environment (no API keys)\n5. Mark integration tests with @pytest.mark.integration\n6. Use `pytest -m \"not integration\"` for fast unit test runs",
+        "priority": "medium",
+        "dependencies": [
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create tests/conftest.py with shared fixtures",
+            "description": "Implement conftest.py with fixtures for temp directories, sample PRD/code, mock YAML configs, and test repo structures.",
+            "dependencies": [],
+            "details": "Copy provided conftest.py code exactly. Add fixtures: temp_dir, sample_prd, sample_code_context, mock_prompts_yaml, mock_profiles_yaml, config_dir, test_repo. Ensure cleanup with shutil.rmtree.",
+            "status": "pending",
+            "testStrategy": "Run pytest tests/conftest.py -s to verify fixtures create/cleanup correctly without errors",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement tests/test_config.py",
+            "description": "Create comprehensive tests for config.py covering env loading, defaults, validation, and path resolution.",
+            "dependencies": [
+              1
+            ],
+            "details": "Test Config loading from config_dir fixture, environment variable overrides, default values, path resolution with test_repo, validation errors for missing files/invalid YAML. Use parametrize for edge cases.",
+            "status": "pending",
+            "testStrategy": "pytest tests/test_config.py --cov=src/metaagent/config -v ensuring 90%+ coverage, happy path and validation errors pass",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement tests/test_prompts.py",
+            "description": "Create tests for prompts.py module: loading YAML, rendering templates, error handling for missing/invalid files.",
+            "dependencies": [
+              1
+            ],
+            "details": "Test PromptLibrary loading from mock_prompts_yaml/profiles_yaml fixtures, Prompt.render() with jinja variables (prd, code_context, history, stage), get_prompts_for_profile(), list_profiles(), missing file errors.",
+            "status": "pending",
+            "testStrategy": "pytest tests/test_prompts.py -v verify rendering produces expected output strings, invalid YAML raises ValueError",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement tests/test_repomix.py with subprocess mocks",
+            "description": "Test repomix.py with comprehensive subprocess.run mocking for success, failure, timeout, FileNotFoundError, truncation.",
+            "dependencies": [
+              1
+            ],
+            "details": "Use pytest mocker for subprocess.run. Test RepomixRunner with test_repo fixture, mock stdout/stderr/returncode, verify truncation logic, error handling paths, RepomixResult parsing.",
+            "status": "pending",
+            "testStrategy": "pytest tests/test_repomix.py::TestRepomix -v ensure all mock scenarios (0,1,timeout,FileNotFoundError) return expected RepomixResult objects",
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Implement tests/test_analysis.py with httpx mocks",
+            "description": "Test analysis.py: MockAnalysisEngine, create_analysis_engine(), _parse_response() with valid JSON and fallbacks.",
+            "dependencies": [
+              1
+            ],
+            "details": "Mock httpx.Client for real engine tests. Test mock mode returns deterministic AnalysisResult, parsing valid/invalid JSON responses, fallback parsing, use_mock=True/None api_key behavior.",
+            "status": "pending",
+            "testStrategy": "pytest tests/test_analysis.py -v verify MockAnalysisEngine.analyze() returns consistent AnalysisResult, parse_response handles malformed JSON gracefully",
+            "parentId": "undefined"
+          },
+          {
+            "id": 6,
+            "title": "Implement tests/test_plan_writer.py",
+            "description": "Test plan_writer.py: file output generation, section formatting, priority sorting, edge case handling.",
+            "dependencies": [
+              1
+            ],
+            "details": "Use temp_dir fixture for output files. Test PlanWriter with sample AnalysisResult/tasks, verify markdown sections rendered correctly, priority sorting (high>medium>low), empty tasks edge case.",
+            "status": "pending",
+            "testStrategy": "pytest tests/test_plan_writer.py -v check generated markdown files match expected content via file.read_text()",
+            "parentId": "undefined"
+          },
+          {
+            "id": 7,
+            "title": "Implement orchestrator.py and CLI tests with coverage",
+            "description": "Create tests/test_orchestrator.py and tests/test_cli.py. Add pytest markers, coverage config, CI-ready setup.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "details": "Test Orchestrator.refine() full workflow with mocks. Use typer.testing.CliRunner for CLI tests. Add pytest.ini with markers (slow, integration). Ensure no external deps. Mock all APIs/subprocess.",
+            "status": "pending",
+            "testStrategy": "pytest tests/ --cov=src/metaagent --cov-report=term-missing -m 'not slow' ensuring >80% coverage, all unit tests pass. Separate integration marker tests.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 8,
+        "recommendedSubtasks": 7,
+        "expansionPrompt": "Break down Task 10 (Add Comprehensive Test Suite) into 7 subtasks: (1) create tests/conftest.py with shared fixtures for temp dirs, sample PRD/code, mock config YAMLs, and test repos; (2) implement tests for config.py (env loading, defaults, validation, path resolution); (3) implement tests for prompts.py (loading, rendering, missing files, invalid data); (4) implement tests for repomix.py with mocked subprocess.run covering success/failure/timeout/FileNotFoundError and truncation logic; (5) implement tests for analysis.py with mocked httpx, including mock engine and parse fallbacks; (6) implement tests for plan_writer.py (file output, sections, priority sorting, edge cases); (7) implement orchestrator and CLI tests using mocks/CliRunner, add coverage configuration, and mark slow/integration tests. Explicitly plan for deterministic, isolated tests suitable for CI with no external services or Node dependencies.",
+        "updatedAt": "2025-12-14T02:00:39.501Z"
+      },
+      {
+        "id": "11",
+        "title": "Create Documentation and Environment Setup",
+        "description": "Write README.md with installation instructions, usage examples, and update .env.example with all required environment variables.",
+        "details": "Create `README.md`:\n\n```markdown\n# Meta-Agent\n\nA Python CLI tool for automated codebase refinement from v0 to MVP.\n\n## Overview\n\nMeta-Agent analyzes your codebase against a PRD and generates an improvement plan using AI-powered analysis. It integrates:\n- **Repomix** for codebase packing\n- **Perplexity API** for analysis and planning\n- Generates plans for **Claude Code** to implement\n\n## Installation\n\n```bash\n# Clone the repository\ngit clone <repo-url>\ncd meta-agent\n\n# Install with uv (recommended)\nuv pip install -e .\n\n# Or with pip\npip install -e .\n```\n\n## Configuration\n\n1. Copy `.env.example` to `.env`\n2. Add your API keys:\n   - `PERPLEXITY_API_KEY` - Required for AI analysis\n   - `ANTHROPIC_API_KEY` - Optional, for Claude integration\n\n## Usage\n\n### Basic Usage\n\n```bash\n# Refine current directory with automation_agent profile\nmetaagent refine --profile automation_agent --repo .\n\n# Use mock mode for testing (no API calls)\nmetaagent refine --profile automation_agent --repo . --mock\n\n# List available profiles\nmetaagent list-profiles\n```\n\n### Profiles\n\n- `automation_agent` - For CLI tools and automation agents\n- `backend_service` - For API backends and services  \n- `internal_tool` - For internal developer tools\n\n### Output\n\nAfter running, find the improvement plan at `docs/mvp_improvement_plan.md`.\n\n## Development\n\n```bash\n# Install dev dependencies\nuv pip install -e \".[dev]\"\n\n# Run tests\npytest tests/ -v\n\n# Run with coverage\npytest tests/ --cov=metaagent --cov-report=html\n```\n\n## Project Structure\n\n```\nmeta-agent/\n├── src/metaagent/     # Main package\n│   ├── cli.py         # CLI entrypoint\n│   ├── orchestrator.py # Main workflow\n│   ├── repomix.py     # Repomix integration\n│   ├── prompts.py     # Prompt/profile loading\n│   ├── analysis.py    # LLM analysis engine\n│   └── plan_writer.py # Plan generation\n├── config/\n│   ├── prompts.yaml   # Prompt templates\n│   └── profiles.yaml  # Profile definitions\n└── tests/             # Test suite\n```\n\n## License\n\nMIT\n```\n\nUpdate `.env.example` for meta-agent:\n```bash\n# Meta-Agent Configuration\n\n# Required: Perplexity API key for analysis\nPERPLEXITY_API_KEY=\"pplx-...\"\n\n# Optional: Anthropic API key for Claude integration\nANTHROPIC_API_KEY=\"sk-ant-...\"\n\n# Optional: Logging and behavior\nMETAAGENT_LOG_LEVEL=INFO\nMETAAGENT_TIMEOUT=120\nMETAAGENT_MAX_TOKENS=100000\n```",
+        "testStrategy": "Verification:\n1. README renders correctly in GitHub/GitLab\n2. Installation instructions work on clean environment\n3. All CLI examples in README work correctly\n4. .env.example contains all environment variables used in code\n5. No sensitive data in example files",
+        "priority": "low",
+        "dependencies": [
+          "1",
+          "8",
+          "9"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Write Comprehensive README.md",
+            "description": "Create the full README.md file including overview, installation instructions for uv and pip, configuration steps, usage examples, profiles description, output details, development workflow, and project structure as specified.",
+            "dependencies": [],
+            "details": "Use the provided README template as base. Ensure all sections are complete: Overview with integrations (Repomix, Perplexity, Claude), Installation with git clone + uv/pip, Configuration with .env steps, Usage with basic/mock/list-profiles examples, Profiles list, Output location, Development with dev deps/tests/coverage, Project structure tree, and License. Make repo-url placeholder clear.",
+            "status": "pending",
+            "testStrategy": "Verify Markdown renders correctly in GitHub preview, check all code blocks are valid bash/python, ensure instructions match current CLI behavior from task dependencies.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Create and Update .env.example File",
+            "description": "Generate .env.example with all environment variables from Config.from_env including required/optional vars, safe placeholders, and explanatory comments.",
+            "dependencies": [],
+            "details": "Include PERPLEXITY_API_KEY (required), ANTHROPIC_API_KEY (optional), METAAGENT_LOG_LEVEL=INFO, METAAGENT_TIMEOUT=120, METAAGENT_MAX_TOKENS=100000. Match exactly Config dataclass fields: perplexity_api_key, anthropic_api_key, log_level, timeout, max_tokens. Add comments explaining purpose and defaults.",
+            "status": "pending",
+            "testStrategy": "Validate file is correct YAML-like format, cross-check against src/metaagent/config.py Config.from_env expected vars, ensure no real API keys, test loading with dotenv in clean env.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Validate Documentation in Clean Environment",
+            "description": "Manually test README instructions and .env.example by following steps in a fresh environment, verify consistency with code and CLI behavior.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "In clean dir: 1) Clone/follow install (uv/pip), 2) Copy .env.example to .env with dummy keys, 3) Run CLI examples (metaagent --help, list-profiles, refine --mock), 4) Check output/docs/mvp_improvement_plan.md generates, 5) Run dev commands (pytest). Note any discrepancies for future updates.",
+            "status": "pending",
+            "testStrategy": "Checklist: Installation succeeds without errors, all README CLI examples execute without crashes, .env vars load correctly per Config.from_env tests, docs match actual project structure/dependencies (tasks 1,2,8,9), no broken links/paths.",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 4,
+        "recommendedSubtasks": 3,
+        "expansionPrompt": "Break down Task 11 (Create Documentation and Environment Setup) into 3 subtasks: (1) write README.md with clear overview, installation (uv and pip), configuration, usage examples, profiles description, output description, development workflow, and project structure; (2) create .env.example listing all relevant environment variables with safe placeholder values and comments; (3) manually validate docs by following the README in a clean environment and cross-checking that .env.example matches what Config.from_env expects and what the code actually uses. Note how to keep examples up to date with CLI and config behavior.",
+        "updatedAt": "2025-12-14T02:00:46.066Z"
+      },
+      {
+        "id": "12",
+        "title": "End-to-End Integration Test with Mock Mode",
+        "description": "Create an end-to-end test that exercises the complete workflow using mock mode, verifying the system generates a valid improvement plan.",
+        "details": "Create `tests/test_e2e.py`:\n\n```python\nimport pytest\nfrom pathlib import Path\nfrom typer.testing import CliRunner\n\nfrom metaagent.cli import app\n\nrunner = CliRunner()\n\nclass TestEndToEnd:\n    \"\"\"End-to-end tests for the complete refinement workflow.\"\"\"\n    \n    @pytest.fixture\n    def sample_repo(self, tmp_path):\n        \"\"\"Create a complete sample repository for testing.\"\"\"\n        repo = tmp_path / 'sample_project'\n        repo.mkdir()\n        \n        # Create docs/prd.md\n        docs = repo / 'docs'\n        docs.mkdir()\n        (docs / 'prd.md').write_text('''\n# Sample Project PRD\n\n## Overview\nA simple calculator CLI application.\n\n## Requirements\n- FR1: Add two numbers\n- FR2: Subtract two numbers\n- FR3: Display help message\n\n## Success Criteria\n- All operations return correct results\n- Error handling for invalid input\n''')\n        \n        # Create source files\n        src = repo / 'src'\n        src.mkdir()\n        (src / 'calculator.py').write_text('''\ndef add(a, b):\n    return a + b\n\ndef subtract(a, b):\n    return a - b\n''')\n        (src / 'main.py').write_text('''\nfrom calculator import add, subtract\nimport sys\n\ndef main():\n    if len(sys.argv) < 4:\n        print(\"Usage: calc <add|sub> <a> <b>\")\n        return\n    op, a, b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n    if op == \"add\":\n        print(add(a, b))\n    elif op == \"sub\":\n        print(subtract(a, b))\n\nif __name__ == \"__main__\":\n    main()\n''')\n        \n        return repo\n    \n    def test_full_refinement_mock_mode(self, sample_repo):\n        \"\"\"Test complete refinement workflow in mock mode.\"\"\"\n        result = runner.invoke(app, [\n            'refine',\n            '--profile', 'automation_agent',\n            '--repo', str(sample_repo),\n            '--mock'\n        ])\n        \n        assert result.exit_code == 0\n        assert 'Refinement completed' in result.stdout\n        \n        # Verify plan was created\n        plan_path = sample_repo / 'docs' / 'mvp_improvement_plan.md'\n        assert plan_path.exists()\n        \n        plan_content = plan_path.read_text()\n        assert '# MVP Improvement Plan' in plan_content\n        assert 'automation_agent' in plan_content\n        assert 'Prioritized Task List' in plan_content\n        assert 'Instructions for Claude Code' in plan_content\n    \n    def test_refinement_with_internal_tool_profile(self, sample_repo):\n        \"\"\"Test refinement with internal_tool profile (fewer stages).\"\"\"\n        result = runner.invoke(app, [\n            'refine',\n            '--profile', 'internal_tool',\n            '--repo', str(sample_repo),\n            '--mock'\n        ])\n        \n        assert result.exit_code == 0\n        \n        plan_path = sample_repo / 'docs' / 'mvp_improvement_plan.md'\n        plan_content = plan_path.read_text()\n        \n        # internal_tool has fewer stages\n        assert 'alignment_with_prd' in plan_content\n        assert 'core_flow_hardening' in plan_content\n    \n    def test_refinement_fails_without_prd(self, tmp_path):\n        \"\"\"Test that refinement fails gracefully without PRD.\"\"\"\n        empty_repo = tmp_path / 'empty'\n        empty_repo.mkdir()\n        \n        result = runner.invoke(app, [\n            'refine',\n            '--profile', 'automation_agent',\n            '--repo', str(empty_repo),\n            '--mock'\n        ])\n        \n        # Should fail or warn about missing PRD\n        assert 'PRD' in result.stdout or result.exit_code != 0\n    \n    def test_list_profiles_command(self):\n        \"\"\"Test list-profiles command shows available profiles.\"\"\"\n        result = runner.invoke(app, ['list-profiles'])\n        \n        assert result.exit_code == 0\n        assert 'automation_agent' in result.stdout\n        assert 'backend_service' in result.stdout\n        assert 'internal_tool' in result.stdout\n```\n\nThis test validates:\n1. CLI invocation works correctly\n2. Mock mode bypasses API calls\n3. Plan file is generated with correct structure\n4. Different profiles produce appropriate output\n5. Error handling for missing PRD\n6. list-profiles command works",
+        "testStrategy": "Run e2e tests:\n1. `pytest tests/test_e2e.py -v` to run all e2e tests\n2. Verify tests pass without any API keys configured\n3. Verify tests are isolated (use tmp_path fixtures)\n4. Verify generated plan files contain expected sections\n5. Run with `--tb=long` to debug any failures",
+        "priority": "medium",
+        "dependencies": [
+          "7",
+          "8",
+          "9",
+          "10"
+        ],
+        "status": "done",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Design and implement sample_repo fixture with minimal realistic project structure",
+            "description": "Create a pytest fixture that builds a temporary sample repository with docs/prd.md and simple src code mirroring a realistic yet minimal project for end-to-end tests.",
+            "dependencies": [],
+            "details": "Implement the sample_repo fixture in tests/test_e2e.py using tmp_path to create an isolated directory tree (e.g., sample_project/docs/prd.md and src/*.py). Ensure prd.md contains PRD-style sections (Overview, Requirements, Success Criteria) and src includes a small but working CLI app (e.g., calculator main and helper module). Confirm paths match what metaagent refine expects (docs/prd.md and any default repo layout assumptions). Keep file contents minimal but sufficient for downstream PRD parsing and prompt rendering.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Write end-to-end tests invoking metaagent refine in mock mode for multiple profiles",
+            "description": "Add pytest tests that use Typer’s CliRunner to invoke the metaagent CLI refine command in mock mode with different profiles, asserting exit codes and key output text.",
+            "dependencies": [
+              1
+            ],
+            "details": "In tests/test_e2e.py, use CliRunner (from typer.testing) to run app with commands like ['refine', '--profile', 'automation_agent', '--repo', str(sample_repo), '--mock']. Assert result.exit_code == 0 and that known success strings such as 'Refinement completed' (or equivalent success message) appear in result.stdout. Add a separate test for at least one additional profile (e.g., internal_tool) to ensure profile selection is wired correctly in the CLI and orchestrator. Ensure these tests rely only on mock mode (no network, no real API keys).",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Assert generation and structure of docs/mvp_improvement_plan.md for each profile",
+            "description": "Verify that running refine in mock mode creates docs/mvp_improvement_plan.md and that the file contains required sections, headings, and profile-specific markers.",
+            "dependencies": [
+              2
+            ],
+            "details": "Extend the refine tests to compute plan_path = sample_repo / 'docs' / 'mvp_improvement_plan.md' and assert plan_path.exists(). Read the file and assert presence of required structural elements such as '# MVP Improvement Plan', a section describing a prioritized task list, and any expected headings like 'Prioritized Task List' and 'Instructions for Claude Code'. Also assert that the active profile name (e.g., 'automation_agent' or 'internal_tool') appears somewhere in the plan body so tests confirm profile-aware content. Keep expectations general enough that normal template copy changes do not cause brittle failures, but specific enough to validate correct plan template wiring.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Add tests for failure scenarios and list-profiles CLI behavior",
+            "description": "Create additional end-to-end tests covering graceful failure when PRD is missing and verifying that the list-profiles command reports all expected profiles.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Add a test that creates an empty temporary repo (e.g., empty_repo = tmp_path / 'empty') without docs/prd.md and runs refine in mock mode. Assert non-zero exit_code or that stdout contains a clear message mentioning missing PRD. Add a separate test invoking ['list-profiles'] and assert exit_code == 0 and that stdout contains all configured profile identifiers (e.g., automation_agent, backend_service, internal_tool). These tests should exercise the same CLI app object and use CliRunner, confirming both error handling paths and discovery/printing of available profiles.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Ensure e2e tests are isolated, fast, and optionally marked as integration tests",
+            "description": "Harden the e2e test module by enforcing isolation with tmp_path fixtures, avoiding real network/API calls via mock mode, and optionally marking tests as integration for selective running.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "Review tests/test_e2e.py to confirm all filesystem operations use tmp_path-based fixtures (no writes to the real project tree) and that refine is always invoked with --mock so the orchestrator never calls real external services. Optionally add a custom pytest marker like @pytest.mark.integration to the TestEndToEnd class or individual tests so they can be included/excluded via -m integration. Confirm that running pytest tests/test_e2e.py -v completes quickly and does not require any environment variables or API keys. Document any ordering dependencies on other tasks (e.g., requires CLI wiring, profiles/prompt config, and mock analysis path from tasks 7–10 to be implemented) in comments or task notes.",
+            "status": "pending",
+            "testStrategy": null,
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 7,
+        "recommendedSubtasks": 5,
+        "expansionPrompt": "Break down Task 12 (End-to-End Integration Test with Mock Mode) into 5 subtasks: (1) design sample_repo fixture that mirrors a realistic but minimal project with docs/prd.md and simple src code; (2) write e2e tests using CliRunner to invoke `metaagent refine` in mock mode for different profiles, asserting exit codes and key output strings; (3) assert that docs/mvp_improvement_plan.md is created and contains required sections and profile info; (4) add tests for failure scenarios (e.g., missing PRD) and for list-profiles behavior; (5) ensure tests are isolated via tmp_path, run quickly using mock analysis (no network), and are optionally marked as integration tests. Highlight any ordering dependencies with other tasks/tests.",
+        "updatedAt": "2025-12-14T02:00:52.678Z"
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2025-12-14T02:00:52.679Z",
+      "taskCount": 12,
+      "completedCount": 12,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}

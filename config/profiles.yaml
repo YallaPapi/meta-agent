@@ -1,0 +1,42 @@
+profiles:
+  automation_agent:
+    name: "Automation Agent"
+    description: "Profile for CLI tools and automation agents. Focuses on robustness, error handling, and user experience."
+    stages:
+      - alignment_with_prd
+      - architecture_sanity
+      - core_flow_hardening
+      - test_suite_mvp
+
+  backend_service:
+    name: "Backend Service"
+    description: "Profile for API backends and services. Includes security review and emphasizes reliability."
+    stages:
+      - alignment_with_prd
+      - architecture_sanity
+      - security_review
+      - core_flow_hardening
+      - test_suite_mvp
+
+  internal_tool:
+    name: "Internal Tool"
+    description: "Lighter profile for internal developer tools. Focuses on core functionality and basic hardening."
+    stages:
+      - alignment_with_prd
+      - core_flow_hardening
+
+  quick_review:
+    name: "Quick Review"
+    description: "Fast review focusing only on PRD alignment. Good for initial assessment."
+    stages:
+      - alignment_with_prd
+
+  full_review:
+    name: "Full Review"
+    description: "Comprehensive review including all available analysis stages."
+    stages:
+      - alignment_with_prd
+      - architecture_sanity
+      - security_review
+      - core_flow_hardening
+      - test_suite_mvp

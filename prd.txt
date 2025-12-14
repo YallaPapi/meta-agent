@@ -1,0 +1,215 @@
+**Product Requirements Document (PRD)**  
+**Project:** Meta‑Agent for Automated Codebase Refinement  
+**Owner:** You  
+**Date:** 2025‑12‑14  
+
+***
+
+## 1. Problem Statement
+
+Building an initial v0 from a PRD with Claude Code is now relatively fast, but turning that v0 into a robust, production‑ready MVP still requires a lot of manual review, planning, and refactoring. Human time is spent on repetitive tasks: scanning the codebase, deciding which Codebase‑Digest‑style prompts to use, interpreting results, and translating them into concrete implementation work.
+
+The goal is to create a **meta‑agent system** that can automatically analyze a codebase, choose appropriate prompts from a prompt library (inspired by Codebase Digest), and orchestrate Perplexity + Claude/Claude Code to iteratively refine a project from “v0 that runs” into “viable MVP,” with minimal human intervention.
+
+***
+
+## 2. Goals & Non‑Goals
+
+### 2.1 Goals
+
+- **G1 – Automate post‑v0 refinement:**  
+  Given a repository and its PRD, the system should automatically run analysis cycles, generate improvement plans, and invoke Claude Code to apply changes.
+
+- **G2 – Prompt‑driven analysis engine:**  
+  Maintain a configurable prompt library (similar to Codebase Digest’s) and allow the system to select and apply prompts in stages (alignment, architecture, hardening, tests).
+
+- **G3 – Tool integration:**  
+  Integrate at least these tools into a coherent pipeline:
+  - Repomix (codebase packing)
+  - Perplexity (analysis/planning)
+  - Claude (review/summary)
+  - Claude Code (implementation)
+
+- **G4 – Project profiles:**  
+  Support multiple “profiles” (e.g., backend service, automation/agent, internal tool) that define which stages and prompts to run.
+
+- **G5 – Transparent plans and diffs:**  
+  Every cycle should produce:
+  - A human‑readable analysis summary.
+  - A prioritized task list / implementation plan.
+  - Links or references to actual code changes (diffs) created by Claude Code.
+
+### 2.2 Non‑Goals
+
+- Not trying to fully replace human review for production‑critical code; human sign‑off is still expected.
+- Not building a generic LLM platform; this is a **developer‑centric pipeline** optimized for your own workflows.
+- Not designing a UI beyond a basic CLI or minimal web dashboard in v1.
+
+***
+
+## 3. High‑Level User Flows
+
+### 3.1 Flow A: PRD → v0 (baseline)
+
+1. User writes a PRD for a new project and saves it as `docs/prd.md` in an empty repo.
+2. User opens the repo in Claude Code.
+3. User instructs Claude Code:  
+   “Use `docs/prd.md` to design and implement an initial v0, with basic tests, so that the main flows run end‑to‑end.”
+4. Claude Code builds the initial implementation and passes tests.
+5. User commits v0 to version control.
+
+*(This phase is manual and outside this system, but assumed as a prerequisite.)*
+
+### 3.2 Flow B: Meta‑Agent → MVP Refinement
+
+1. User runs the meta‑agent CLI:
+
+   ```bash
+   metaagent refine --profile automation_agent --repo /path/to/repo
+   ```
+
+2. Meta‑agent:
+   - Reads `docs/prd.md`.
+   - Runs Repomix on the repo to produce a packed codebase file.
+   - Loads the configured profile and its stages.
+
+3. Stage 1 – **PRD Alignment Analysis**:
+   - Selects the `alignment_with_prd` prompt.
+   - Calls Perplexity with:
+     - PRD
+     - Repomix output
+     - Prompt template
+   - Receives:
+     - Summary of gaps vs PRD.
+     - Task list to close those gaps.
+
+4. Stage 2 – **Architecture / Best Practices**:
+   - Selects `architecture_sanity` and/or `best_practices_analysis` prompts (Digest‑style).
+   - Calls Perplexity again.
+   - Receives: architecture issues, refactor suggestions, and tasks.
+
+5. Stage 3 – **Feature‑specific Hardening**:
+   - For example, `core_flow_hardening` (retry logic, error handling).
+   - Calls Perplexity with the packed code + PRD + current history.
+   - Receives: detailed implementation plan for robustness.
+
+6. Stage 4 – **Test Suite MVP**:
+   - Runs a testing prompt (e.g., `test_suite_mvp`).
+   - Receives: list of missing tests (file names, test cases).
+
+7. Meta‑agent merges all tasks into a single `mvp_improvement_plan.md`.
+
+8. User opens Claude Code on the repo and feeds in `mvp_improvement_plan.md` with instructions to execute tasks in order, showing diffs and running tests.
+
+9. After implementation:
+   - Meta‑agent can re‑run Repomix and a shorter analysis pass to confirm improvements and suggest final tweaks.
+
+***
+
+## 4. Functional Requirements
+
+### 4.1 CLI / Orchestrator
+
+- **FR1:** Provide a CLI command like `metaagent refine --profile <profile> --repo <path>` that starts a refinement run.
+- **FR2:** Detect and load:
+  - PRD file (default `docs/prd.md`).
+  - Prompt library configuration (YAML/JSON).
+  - Profile configuration (mapping stages → prompts).
+
+- **FR3:** Run Repomix on the repo to produce a packed code representation in Markdown or XML.
+
+- **FR4:** Maintain a simple “history log” for each run (high‑level summaries of each analysis cycle).
+
+### 4.2 Prompt Library & Profiles
+
+- **FR5:** Store prompt templates and metadata in configuration (e.g., `config/prompts.yaml`), including:
+  - `id`
+  - `goal`
+  - `template`
+  - `stage` or `category`
+  - Optional `dependencies` or `when_to_use` hints.
+
+- **FR6:** Store profiles in `config/profiles.yaml`, mapping:
+  - Profile name → ordered list of stages (e.g., `alignment_with_prd`, `architecture_sanity`, `core_flow_hardening`, `test_suite_mvp`).
+
+- **FR7:** Allow selection of prompts per stage based on profile and current run state (e.g., fixed order for v1).
+
+### 4.3 Analysis Engine (Perplexity)
+
+- **FR8:** For each stage in the profile, construct a Perplexity prompt that includes:
+  - PRD text.
+  - Truncated Repomix output (to fit context budget).
+  - Run history summary (if any).
+  - The stage’s prompt template.
+
+- **FR9:** Expect structured responses from Perplexity, including at least:
+  - `summary` (what was found).
+  - `recommendations`.
+  - `tasks` (list of actionable items with file references where possible).
+
+- **FR10:** Aggregate `tasks` from all stages into an ordered improvement plan (e.g., group by priority and file).
+
+### 4.4 Plan & Handoff to Claude / Claude Code
+
+- **FR11:** Write the aggregated plan to `docs/mvp_improvement_plan.md`, including:
+  - Short recap of PRD.
+  - Stage summaries.
+  - Prioritized task list with checkboxes.
+
+- **FR12:** Provide a standard instruction block you can paste into Claude Code, telling it how to interpret and execute the plan (taskmaster style).
+
+- **FR13:** Optionally, provide a separate prompt for Claude (non‑code) to turn the plan + analysis into a polished review document if desired.
+
+### 4.5 Iteration / Re‑analysis
+
+- **FR14:** Support re‑running the refinement after code changes:
+  - Regenerate Repomix.
+  - Optionally skip certain stages and focus on tests or architecture only.
+- **FR15:** Track whether “Must‑fix” tasks (e.g., PRD coverage) are resolved based on subsequent analyses.
+
+***
+
+## 5. Non‑Functional Requirements
+
+- **NFR1:** Implementation language: Python 3.10+.
+- **NFR2:** All orchestration should run via CLI; no GUI required for v1.
+- **NFR3:** Configurable timeouts and max token sizes for LLM calls.
+- **NFR4:** Keep secrets (API keys) in environment variables or a separate secrets file, not in repo.
+- **NFR5:** Make it easy to extend the prompt library and profiles without changing Python code.
+
+***
+
+## 6. Integrations & Dependencies
+
+- **Repomix:** Installed CLI accessible on PATH; used to pack codebase.[1][2]
+- **Perplexity API:** Used for analysis stages and plan generation.
+- **Claude (chat) API:** Optional, for generating narrative reviews.
+- **Claude Code:** Used via its IDE / environment for executing the plan (file edits + tests).
+- **Optional:** Codebase‑Digest could be added later as an alternative or complement to Repomix if you want its directory tree and stats.
+
+***
+
+## 7. Milestones
+
+1. **M1 – Minimal orchestrator**  
+   - CLI command.  
+   - Repomix integration.  
+   - Single profile with 2 stages: `alignment_with_prd`, `core_flow_hardening`.  
+   - Generates a basic `mvp_improvement_plan.md`.
+
+2. **M2 – Full profile + prompt library**  
+   - Add `architecture_sanity` and `test_suite_mvp` stages.  
+   - Config‑driven prompts and profiles.  
+   - Basic run history logging.
+
+3. **M3 – Iteration support**  
+   - Ability to re‑run refinement after changes and detect remaining gaps.  
+   - Simple rule‑based logic for skipping or repeating stages.
+
+4. **M4 – Optional review generation**  
+   - Claude integration to create polished review docs from the plan and analysis logs.
+
+If you want, the next step can be turning this PRD into a skeleton repo layout (e.g., `metaagent/cli.py`, `metaagent/prompts.py`, `metaagent/analysis.py`, `config/prompts.yaml`, `config/profiles.yaml`).
+
+[1](https://github.com/yamadashy/repomix)
+[2](https://repomix.com/guide/usage)

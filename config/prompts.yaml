@@ -1,0 +1,211 @@
+prompts:
+  alignment_with_prd:
+    id: alignment_with_prd
+    goal: "Identify gaps between current implementation and PRD requirements"
+    stage: alignment
+    template: |
+      You are analyzing a codebase against its PRD to identify implementation gaps.
+
+      ## Product Requirements Document:
+      {{ prd }}
+
+      ## Current Codebase:
+      {{ code_context }}
+
+      ## Previous Analysis (if any):
+      {{ history }}
+
+      Current Stage: {{ current_stage }}
+
+      ## Your Task:
+      Analyze the codebase against the PRD and identify:
+      1. Features described in the PRD that are missing or incomplete
+      2. Requirements that are partially implemented
+      3. Deviations from the specified architecture or approach
+
+      Provide your response as JSON with this structure:
+      ```json
+      {
+        "summary": "Brief overview of alignment status",
+        "recommendations": ["List of high-level recommendations"],
+        "tasks": [
+          {
+            "title": "Task title",
+            "description": "What needs to be done",
+            "priority": "critical|high|medium|low",
+            "file": "path/to/relevant/file.py"
+          }
+        ]
+      }
+      ```
+
+  architecture_sanity:
+    id: architecture_sanity
+    goal: "Review architecture for best practices and maintainability"
+    stage: architecture
+    template: |
+      You are reviewing a codebase for architectural quality and best practices.
+
+      ## PRD Context:
+      {{ prd }}
+
+      ## Codebase:
+      {{ code_context }}
+
+      ## Previous Analysis:
+      {{ history }}
+
+      Current Stage: {{ current_stage }}
+
+      ## Your Task:
+      Analyze the codebase architecture for:
+      1. Code organization and modularity
+      2. Separation of concerns
+      3. Dependency management and coupling
+      4. Adherence to Python best practices
+      5. Potential scalability issues
+
+      Provide your response as JSON with this structure:
+      ```json
+      {
+        "summary": "Overview of architectural health",
+        "recommendations": ["Architectural improvements to consider"],
+        "tasks": [
+          {
+            "title": "Refactoring task",
+            "description": "Specific changes needed",
+            "priority": "critical|high|medium|low",
+            "file": "path/to/file.py"
+          }
+        ]
+      }
+      ```
+
+  core_flow_hardening:
+    id: core_flow_hardening
+    goal: "Identify robustness improvements for core flows"
+    stage: hardening
+    template: |
+      You are analyzing a codebase to improve robustness and error handling.
+
+      ## PRD:
+      {{ prd }}
+
+      ## Codebase:
+      {{ code_context }}
+
+      ## Analysis History:
+      {{ history }}
+
+      Current Stage: {{ current_stage }}
+
+      ## Your Task:
+      Analyze the core flows and identify improvements for:
+      1. Error handling and recovery
+      2. Input validation
+      3. Edge case handling
+      4. Retry logic for external calls (APIs, file I/O, subprocess)
+      5. Graceful degradation
+      6. Logging and observability
+
+      Provide your response as JSON with this structure:
+      ```json
+      {
+        "summary": "Overview of robustness status",
+        "recommendations": ["Key hardening recommendations"],
+        "tasks": [
+          {
+            "title": "Hardening task",
+            "description": "Specific improvement needed",
+            "priority": "critical|high|medium|low",
+            "file": "path/to/file.py"
+          }
+        ]
+      }
+      ```
+
+  test_suite_mvp:
+    id: test_suite_mvp
+    goal: "Identify critical tests needed for MVP quality"
+    stage: testing
+    template: |
+      You are reviewing test coverage for a codebase.
+
+      ## PRD:
+      {{ prd }}
+
+      ## Codebase:
+      {{ code_context }}
+
+      ## Previous Analysis:
+      {{ history }}
+
+      Current Stage: {{ current_stage }}
+
+      ## Your Task:
+      Analyze the codebase and identify:
+      1. Missing unit tests for core functions
+      2. Missing integration tests for main flows
+      3. Edge cases that need test coverage
+      4. Test infrastructure improvements needed
+
+      Focus on tests that provide the most value for MVP quality.
+
+      Provide your response as JSON with this structure:
+      ```json
+      {
+        "summary": "Overview of test coverage",
+        "recommendations": ["Testing strategy recommendations"],
+        "tasks": [
+          {
+            "title": "Test to add",
+            "description": "What the test should cover",
+            "priority": "critical|high|medium|low",
+            "file": "tests/test_*.py"
+          }
+        ]
+      }
+      ```
+
+  security_review:
+    id: security_review
+    goal: "Identify security vulnerabilities and improvements"
+    stage: security
+    template: |
+      You are performing a security review of a codebase.
+
+      ## PRD:
+      {{ prd }}
+
+      ## Codebase:
+      {{ code_context }}
+
+      ## Previous Analysis:
+      {{ history }}
+
+      Current Stage: {{ current_stage }}
+
+      ## Your Task:
+      Analyze the codebase for security issues including:
+      1. Input validation and sanitization
+      2. Authentication and authorization
+      3. Secrets management
+      4. Injection vulnerabilities
+      5. Data exposure risks
+      6. Dependency vulnerabilities
+
+      Provide your response as JSON with this structure:
+      ```json
+      {
+        "summary": "Security posture overview",
+        "recommendations": ["Security improvements to prioritize"],
+        "tasks": [
+          {
+            "title": "Security fix",
+            "description": "What needs to be secured",
+            "priority": "critical|high|medium|low",
+            "file": "path/to/file.py"
+          }
+        ]
+      }
+      ```

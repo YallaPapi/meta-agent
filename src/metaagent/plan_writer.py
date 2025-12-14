@@ -1,0 +1,219 @@
+"""Plan writer for generating improvement plan documents."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+@dataclass
+class StageResult:
+    """Result from a single analysis stage."""
+
+    stage_id: str
+    stage_name: str
+    summary: str
+    recommendations: list[str] = field(default_factory=list)
+    tasks: list[dict[str, Any]] = field(default_factory=list)
+
+
+class PlanWriter:
+    """Writes aggregated analysis results to an improvement plan document."""
+
+    def __init__(self, output_dir: Path):
+        """Initialize the plan writer.
+
+        Args:
+            output_dir: Directory to write the plan file to.
+        """
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_plan(
+        self,
+        prd_content: str,
+        profile_name: str,
+        stage_results: list[StageResult],
+        output_filename: str = "mvp_improvement_plan.md",
+    ) -> Path:
+        """Write the improvement plan to a markdown file.
+
+        Args:
+            prd_content: Original PRD content for summary.
+            profile_name: Name of the profile used.
+            stage_results: List of StageResult from each analysis stage.
+            output_filename: Name of the output file.
+
+        Returns:
+            Path to the written file.
+        """
+        output_path = self.output_dir / output_filename
+
+        sections = [
+            self._generate_header(profile_name),
+            self._generate_prd_summary(prd_content),
+            self._generate_stage_summaries(stage_results),
+            self._generate_task_list(stage_results),
+            self._generate_instructions(),
+        ]
+
+        content = "\n\n".join(sections)
+
+        output_path.write_text(content, encoding="utf-8")
+        return output_path
+
+    def _generate_header(self, profile_name: str) -> str:
+        """Generate the document header."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return f"""# MVP Improvement Plan
+
+**Generated:** {timestamp}
+**Profile:** {profile_name}
+**Status:** Ready for implementation
+
+---"""
+
+    def _generate_prd_summary(self, prd_content: str) -> str:
+        """Generate a summary of the PRD."""
+        summary = self._extract_prd_summary(prd_content)
+        return f"""## PRD Summary
+
+{summary}"""
+
+    def _extract_prd_summary(self, prd_content: str, max_lines: int = 20) -> str:
+        """Extract a summary from the PRD content.
+
+        Args:
+            prd_content: Full PRD content.
+            max_lines: Maximum lines to include.
+
+        Returns:
+            Summarized PRD content.
+        """
+        lines = prd_content.strip().split("\n")
+        if len(lines) <= max_lines:
+            return prd_content.strip()
+
+        # Take first max_lines and add truncation notice
+        summary_lines = lines[:max_lines]
+        return "\n".join(summary_lines) + "\n\n*[PRD truncated for brevity]*"
+
+    def _generate_stage_summaries(self, stage_results: list[StageResult]) -> str:
+        """Generate summaries for each analysis stage."""
+        if not stage_results:
+            return "## Analysis Stages\n\n*No stages were executed.*"
+
+        sections = ["## Analysis Stages"]
+
+        for result in stage_results:
+            section = f"""### {result.stage_name}
+
+{result.summary}"""
+
+            if result.recommendations:
+                section += "\n\n**Recommendations:**\n"
+                for rec in result.recommendations:
+                    section += f"- {rec}\n"
+
+            sections.append(section)
+
+        return "\n\n".join(sections)
+
+    def _generate_task_list(self, stage_results: list[StageResult]) -> str:
+        """Generate the aggregated and prioritized task list."""
+        all_tasks = self._aggregate_tasks(stage_results)
+
+        if not all_tasks:
+            return "## Implementation Tasks\n\n*No tasks were identified.*"
+
+        sections = ["## Implementation Tasks\n"]
+
+        # Group by priority
+        priority_order = ["critical", "high", "medium", "low"]
+        tasks_by_priority: dict[str, list[dict]] = {p: [] for p in priority_order}
+
+        for task in all_tasks:
+            priority = task.get("priority", "medium").lower()
+            if priority not in tasks_by_priority:
+                priority = "medium"
+            tasks_by_priority[priority].append(task)
+
+        for priority in priority_order:
+            tasks = tasks_by_priority[priority]
+            if not tasks:
+                continue
+
+            badge = self._priority_badge(priority)
+            sections.append(f"### {badge} {priority.capitalize()} Priority\n")
+
+            for task in tasks:
+                title = task.get("title", "Untitled task")
+                description = task.get("description", "")
+                file_ref = task.get("file", "")
+
+                task_line = f"- [ ] **{title}**"
+                if file_ref:
+                    task_line += f" (`{file_ref}`)"
+                if description:
+                    task_line += f"\n  - {description}"
+
+                sections.append(task_line)
+
+            sections.append("")  # Add spacing between priority groups
+
+        return "\n".join(sections)
+
+    def _aggregate_tasks(self, stage_results: list[StageResult]) -> list[dict]:
+        """Aggregate tasks from all stages, removing duplicates."""
+        all_tasks = []
+        seen_titles = set()
+
+        for result in stage_results:
+            for task in result.tasks:
+                title = task.get("title", "")
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    # Add stage info to task
+                    task["stage"] = result.stage_id
+                    all_tasks.append(task)
+
+        return all_tasks
+
+    def _priority_badge(self, priority: str) -> str:
+        """Get an emoji badge for the priority level."""
+        badges = {
+            "critical": "[CRITICAL]",
+            "high": "[HIGH]",
+            "medium": "[MEDIUM]",
+            "low": "[LOW]",
+        }
+        return badges.get(priority.lower(), "[MEDIUM]")
+
+    def _generate_instructions(self) -> str:
+        """Generate instructions for using the plan with Claude Code."""
+        return """---
+
+## Instructions for Claude Code
+
+To implement this plan, open Claude Code in the repository and use the following prompt:
+
+```
+Read docs/mvp_improvement_plan.md and implement the tasks in order of priority.
+For each task:
+1. Understand the requirement
+2. Make the necessary code changes
+3. Run relevant tests
+4. Mark the checkbox as complete when done
+
+Start with the highest priority tasks first.
+```
+
+### Implementation Notes
+
+- Work through tasks systematically, starting with Critical/High priority
+- Run tests after each significant change
+- Commit changes incrementally with descriptive messages
+- If a task is unclear, review the relevant stage summary above for context
+"""

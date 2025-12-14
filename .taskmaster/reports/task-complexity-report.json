@@ -1,0 +1,109 @@
+{
+	"meta": {
+		"generatedAt": "2025-12-14T01:45:45.101Z",
+		"tasksAnalyzed": 12,
+		"totalTasks": 12,
+		"analysisCount": 12,
+		"thresholdScore": 5,
+		"projectName": "Taskmaster",
+		"usedResearch": true
+	},
+	"complexityAnalysis": [
+		{
+			"taskId": 1,
+			"taskTitle": "Initialize Python Project Structure",
+			"complexityScore": 3,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "Break down Task 1 (Initialize Python Project Structure) into 4 concrete subtasks covering: (1) authoring a modern pyproject.toml with src-layout, dependency groups for dev, and console_script entry point; (2) creating the specified src/, config/, tests/, and docs/ directory/files skeletons; (3) setting up .gitignore following Python and common tooling patterns; (4) creating a minimal but correct README.md with install, usage, and development notes. For each subtask, specify clear acceptance criteria and any tooling conventions (e.g., uv, pytest).",
+			"reasoning": "This is mostly mechanical project scaffolding using standard src-layout packaging best practices and a console_script entry point, with minimal logic and straightforward verification via install and `metaagent --help`. Complexity comes from getting pyproject metadata and paths correct, but there are no tricky algorithms or integrations."
+		},
+		{
+			"taskId": 2,
+			"taskTitle": "Implement Configuration Management",
+			"complexityScore": 4,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "Break down Task 2 (Implement Configuration Management) into 4 subtasks: (1) implement Config dataclass and from_env factory using python-dotenv and robust type conversion with defaults; (2) implement validate() including repo/config/output/PRD path checks and behavior in dev vs installed modes; (3) wire Config into a minimal caller (e.g., stub CLI) to verify usage patterns; (4) create focused pytest unit tests using monkeypatch/tmp_path for environment and filesystem scenarios. For each subtask, call out edge cases (missing env vars, non-existent paths) and test expectations.",
+			"reasoning": "The module is small but sits at the core of the app; it needs careful handling of environment variables, path resolution, and validation semantics, plus testability across dev and installed modes. Still, patterns are standard and well-understood, so complexity is moderate but not high."
+		},
+		{
+			"taskId": 3,
+			"taskTitle": "Implement Prompt and Profile Loading",
+			"complexityScore": 5,
+			"recommendedSubtasks": 5,
+			"expansionPrompt": "Break down Task 3 (Implement Prompt and Profile Loading) into 5 subtasks: (1) define Prompt and Profile dataclasses plus PromptLibrary interface; (2) implement YAML loading with safe_load, error handling, and missing-file behavior; (3) implement Prompt.render() using Jinja2 with a fixed variable contract and guardrails for template errors; (4) implement profile/query helpers (get_prompt, get_profile, list_profiles, get_prompts_for_profile) with ordering guarantees; (5) write unit tests covering YAML fixtures, rendering, missing files, and invalid data cases. Explicitly note how to keep loading side effects contained for testability.",
+			"reasoning": "This introduces configuration-driven behavior, YAML parsing, templating, and lookup utilities. The implementation itself is straightforward, but correctness depends on handling malformed configs, missing keys, and template rendering errors, and on designing a stable contract for templates, which adds moderate complexity."
+		},
+		{
+			"taskId": 4,
+			"taskTitle": "Implement Repomix Integration",
+			"complexityScore": 6,
+			"recommendedSubtasks": 5,
+			"expansionPrompt": "Break down Task 4 (Implement Repomix Integration) into 5 subtasks: (1) design RepomixResult dataclass and RepomixRunner API; (2) implement pack() using subprocess.run with cwd, temp file handling, and robust cleanup in finally; (3) implement error handling branches for non-zero exit, TimeoutExpired, and FileNotFoundError with clear messages; (4) implement truncate_content() with a well-documented token-to-char heuristic and tests around boundaries; (5) write unit tests using monkeypatch to mock subprocess.run and filesystem interactions, covering success, failure, timeout, and missing binary cases. Include notes on making this stable in CI where Node/repomix may not be installed.",
+			"reasoning": "Although the code is not large, integrating with an external CLI via subprocess, timeouts, temp files, and cleanup adds meaningful edge cases. Achieving deterministic, platform-agnostic tests with mocks increases complexity beyond simple I/O code."
+		},
+		{
+			"taskId": 5,
+			"taskTitle": "Implement Analysis Engine with Mock Mode",
+			"complexityScore": 7,
+			"recommendedSubtasks": 6,
+			"expansionPrompt": "Break down Task 5 (Implement Analysis Engine with Mock Mode) into 6 subtasks: (1) define AnalysisResult dataclass and AnalysisEngine protocol; (2) implement MockAnalysisEngine with deterministic outputs for tests; (3) implement PerplexityAnalysisEngine HTTP client using httpx, including headers, payload shape, timeout, and error handling; (4) implement _parse_response() to robustly extract JSON from raw content or ```json``` blocks and degrade gracefully on invalid JSON; (5) implement create_analysis_engine() factory with clear rules for mock vs real engine; (6) write unit tests that fully mock httpx.Client to cover success, HTTP errors, malformed model responses, and JSON parse fallbacks, ensuring no real network access. Highlight security considerations around API keys and logging.",
+			"reasoning": "This module integrates with an external API, handles network errors, timeouts, and JSON parsing of sometimes messy LLM responses. It also defines a key extension point and must be robust and testable without real API calls, which raises both design and testing complexity."
+		},
+		{
+			"taskId": 6,
+			"taskTitle": "Implement Plan Writer",
+			"complexityScore": 5,
+			"recommendedSubtasks": 5,
+			"expansionPrompt": "Break down Task 6 (Implement Plan Writer) into 5 subtasks: (1) define StageResult dataclass and PlanWriter constructor creating output_dir; (2) implement write_plan() to assemble sections (metadata, PRD summary, stage summaries, prioritized tasks, instructions) into Markdown; (3) implement _extract_prd_summary() with length limits and line-aware truncation; (4) implement _aggregate_tasks() and _priority_badge() with clear priority ordering and emoji mapping; (5) write unit tests using tmp_path to verify file creation, content sections, priority sorting, and behavior with empty tasks/stages. Note any i18n/encoding considerations for emojis and UTF-8 writes.",
+			"reasoning": "The logic is mostly deterministic string and list processing, but it coordinates multiple inputs (PRD, multi-stage results, prioritization) into a user-facing artifact. Edge cases around empty inputs, ordering, and Markdown formatting need attention, yet overall complexity remains moderate."
+		},
+		{
+			"taskId": 7,
+			"taskTitle": "Implement Orchestrator",
+			"complexityScore": 8,
+			"recommendedSubtasks": 7,
+			"expansionPrompt": "Break down Task 7 (Implement Orchestrator) into 7 subtasks: (1) define RunHistory and RefinementResult data structures; (2) implement Orchestrator.__init__ wiring Config, PromptLibrary, RepomixRunner, AnalysisEngine factory, and PlanWriter; (3) implement _load_prd() with clear failure behavior; (4) implement Repomix integration inside refine(), including warning handling and context truncation; (5) implement stage loop: fetching prompts for a profile, rendering with history, invoking analysis, accumulating StageResult, and updating RunHistory; (6) implement plan generation and final RefinementResult assembly with success/error semantics; (7) write unit tests that heavily mock PromptLibrary, RepomixRunner, and AnalysisEngine to cover success path, missing profile, missing PRD, Repomix failures, partial stage failures, history accumulation, and no-stages cases. Emphasize separation of orchestration logic from I/O for testability.",
+			"reasoning": "This is the central workflow coordinator that ties together configuration, prompts, external tooling, analysis engine, and plan writing. It must manage control flow, error propagation, partial failures, and history across multiple stages. The number of dependencies and branching paths makes this one of the most complex pieces in the system."
+		},
+		{
+			"taskId": 8,
+			"taskTitle": "Implement CLI Entrypoint",
+			"complexityScore": 6,
+			"recommendedSubtasks": 6,
+			"expansionPrompt": "Break down Task 8 (Implement CLI Entrypoint) into 6 subtasks: (1) set up Typer app structure and main() entrypoint compatible with pyproject console_script; (2) implement logging setup with RichHandler and configurable levels; (3) implement refine command: argument parsing, repo path resolution, Config.from_env usage, optional PRD override, config validation, profile existence check, orchestrator invocation, and result reporting; (4) implement list_profiles command: config_dir override, PromptLibrary usage, and formatted output; (5) ensure CLI error handling exits with proper codes and user-friendly Rich messages; (6) write tests using typer.testing.CliRunner that exercise success and failure paths, mock mode, verbose flag, invalid repo/profile, and help text. Note cross-platform path considerations and how to avoid hitting real APIs/subprocesses in tests.",
+			"reasoning": "While Typer simplifies argument parsing, the CLI still has to coordinate configuration, validation, and orchestrator invocation, and present clear UX and exit codes. It’s at the boundary with the user and must handle many error conditions, increasing complexity, especially for robust tests."
+		},
+		{
+			"taskId": 9,
+			"taskTitle": "Create Complete Configuration Files",
+			"complexityScore": 3,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Break down Task 9 (Create Complete Configuration Files) into 3 subtasks: (1) author prompts.yaml exactly per PRD, adding required Jinja placeholders (prd, code_context, history, current_stage) and validate formatting; (2) author profiles.yaml with all profiles and stage sequences, ensuring all referenced stages exist in prompts.yaml; (3) write small validation tests or scripts (e.g., in tests/test_prompts.py) to load both YAML files via PromptLibrary and assert prompt/profile counts, renderability, and referential integrity. Note how to keep these configs environment-agnostic for CI.",
+			"reasoning": "This is primarily static configuration authoring with YAML. The main risk is mismatched IDs, bad indentation, or missing template variables, all of which can be caught with simple validation tests. Implementation effort and technical complexity are relatively low."
+		},
+		{
+			"taskId": 10,
+			"taskTitle": "Add Comprehensive Test Suite",
+			"complexityScore": 8,
+			"recommendedSubtasks": 7,
+			"expansionPrompt": "Break down Task 10 (Add Comprehensive Test Suite) into 7 subtasks: (1) create tests/conftest.py with shared fixtures for temp dirs, sample PRD/code, mock config YAMLs, and test repos; (2) implement tests for config.py (env loading, defaults, validation, path resolution); (3) implement tests for prompts.py (loading, rendering, missing files, invalid data); (4) implement tests for repomix.py with mocked subprocess.run covering success/failure/timeout/FileNotFoundError and truncation logic; (5) implement tests for analysis.py with mocked httpx, including mock engine and parse fallbacks; (6) implement tests for plan_writer.py (file output, sections, priority sorting, edge cases); (7) implement orchestrator and CLI tests using mocks/CliRunner, add coverage configuration, and mark slow/integration tests. Explicitly plan for deterministic, isolated tests suitable for CI with no external services or Node dependencies.",
+			"reasoning": "Designing and implementing a cohesive, high-coverage test suite across multiple modules and external boundaries is substantial work. It requires thoughtful fixture design, extensive mocking, and ensuring tests remain fast and reliable in CI. While each individual test is not complex, the breadth and integration make overall complexity high."
+		},
+		{
+			"taskId": 11,
+			"taskTitle": "Create Documentation and Environment Setup",
+			"complexityScore": 4,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Break down Task 11 (Create Documentation and Environment Setup) into 3 subtasks: (1) write README.md with clear overview, installation (uv and pip), configuration, usage examples, profiles description, output description, development workflow, and project structure; (2) create .env.example listing all relevant environment variables with safe placeholder values and comments; (3) manually validate docs by following the README in a clean environment and cross-checking that .env.example matches what Config.from_env expects and what the code actually uses. Note how to keep examples up to date with CLI and config behavior.",
+			"reasoning": "This is mostly documentation and example configuration work. It must accurately reflect the implemented behavior and be tested manually, but it does not involve intricate code or algorithms. Complexity is modest, driven mainly by the need for consistency with the evolving codebase."
+		},
+		{
+			"taskId": 12,
+			"taskTitle": "End-to-End Integration Test with Mock Mode",
+			"complexityScore": 7,
+			"recommendedSubtasks": 5,
+			"expansionPrompt": "Break down Task 12 (End-to-End Integration Test with Mock Mode) into 5 subtasks: (1) design sample_repo fixture that mirrors a realistic but minimal project with docs/prd.md and simple src code; (2) write e2e tests using CliRunner to invoke `metaagent refine` in mock mode for different profiles, asserting exit codes and key output strings; (3) assert that docs/mvp_improvement_plan.md is created and contains required sections and profile info; (4) add tests for failure scenarios (e.g., missing PRD) and for list-profiles behavior; (5) ensure tests are isolated via tmp_path, run quickly using mock analysis (no network), and are optionally marked as integration tests. Highlight any ordering dependencies with other tasks/tests.",
+			"reasoning": "These tests exercise the full stack—CLI, orchestrator, config, prompts, plan writer—within an isolated environment. While logic is not complex, coordinating filesystem setup, environment, and assertions across modules, and keeping tests deterministic and fast, makes this moderately high in complexity."
+		}
+	]
+}
