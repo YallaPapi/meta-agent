@@ -230,6 +230,102 @@ def list_profiles(
     console.print(table)
 
 
+@app.command("refine-auto")
+def refine_auto(
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        "-r",
+        help="Path to the repository to refine.",
+    ),
+    prd: Optional[Path] = typer.Option(
+        None,
+        "--prd",
+        help="Path to PRD file (default: docs/prd.md in repo).",
+    ),
+    max_iterations: int = typer.Option(
+        10,
+        "--max-iterations",
+        "-n",
+        help="Maximum number of refinement iterations.",
+    ),
+    mock: bool = typer.Option(
+        False,
+        "--mock",
+        "-m",
+        help="Run in mock mode (no API calls).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Enable verbose output.",
+    ),
+) -> None:
+    """Run iterative refinement with AI-driven prompt selection.
+
+    This mode uses a triage step where the AI analyzes your codebase and
+    decides which prompts to run. After each iteration, changes are committed
+    and the codebase is re-analyzed.
+    """
+    setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    # Resolve paths
+    repo_path = repo.resolve()
+    if not repo_path.exists():
+        console.print(f"[red]Error:[/red] Repository path does not exist: {repo_path}")
+        raise typer.Exit(1)
+
+    # Load configuration
+    config = Config.from_env(repo_path)
+
+    # Override with CLI options
+    if prd:
+        config.prd_path = prd.resolve()
+    if mock:
+        config.mock_mode = True
+
+    # Validate configuration
+    errors = config.validate()
+    if errors:
+        console.print("[red]Configuration errors:[/red]")
+        for error in errors:
+            console.print(f"  - {error}")
+        raise typer.Exit(1)
+
+    # Run iterative refinement
+    console.print("\n[bold]Starting iterative refinement[/bold]")
+    console.print(f"[dim]Repository:[/dim] {repo_path}")
+    console.print(f"[dim]Max iterations:[/dim] {max_iterations}")
+    console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}\n")
+
+    orchestrator = Orchestrator(config)
+    result = orchestrator.refine_iterative(max_iterations=max_iterations)
+
+    # Display results
+    if result.success:
+        console.print("\n[green]Iterative refinement completed successfully![/green]\n")
+    else:
+        console.print("\n[yellow]Refinement completed with issues.[/yellow]\n")
+
+    console.print(f"Iterations completed: {len(result.iterations)}")
+    console.print(f"Stages completed: {result.stages_completed}")
+    console.print(f"Stages failed: {result.stages_failed}")
+
+    if result.iterations:
+        console.print("\n[bold]Iteration Summary:[/bold]")
+        for it in result.iterations:
+            status = "[green]committed[/green]" if it.committed else "[yellow]no changes[/yellow]"
+            console.print(f"  {it.iteration}. {', '.join(it.prompts_run)} - {status}")
+
+    if result.plan_path:
+        console.print(f"\n[bold]Final plan written to:[/bold] {result.plan_path}")
+
+    if result.error:
+        console.print(f"\n[red]Error:[/red] {result.error}")
+        raise typer.Exit(1)
+
+
 @app.command("list-prompts")
 def list_prompts(
     config_dir: Optional[Path] = typer.Option(
