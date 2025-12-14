@@ -116,3 +116,8 @@ class Config:
     def prompt_library_path(self) -> Path:
         """Path to prompt_library directory with markdown prompts."""
         return self.config_dir / "prompt_library"
+
+    @property
+    def stage_candidates_file(self) -> Path:
+        """Path to stage_candidates.yaml file."""
+        return self.config_dir / "stage_candidates.yaml"

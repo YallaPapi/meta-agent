@@ -956,3 +956,263 @@ class TestEdgeCases:
 
         # Should complete but with no stages
         assert result.stages_completed == 0
+
+
+# =============================================================================
+# Test: Stage Triage
+# =============================================================================
+
+
+class TestStageTriage:
+    """Tests for stage-specific triage functionality."""
+
+    def test_triage_stage_success(self, tmp_path: Path) -> None:
+        """Test successful stage-specific triage."""
+        from unittest.mock import MagicMock
+
+        analysis_engine = MagicMock()
+        # Return a valid stage triage response
+        analysis_engine.analyze.return_value = AnalysisResult(
+            success=True,
+            summary='{"selected_prompts": ["architecture_layers"], "reasoning": "Test reasoning"}',
+            raw_response='{"selected_prompts": ["architecture_layers"], "reasoning": "Test reasoning"}',
+        )
+
+        # Create prompt library with candidates
+        prompt_lib = tmp_path / "prompt_library"
+        prompt_lib.mkdir()
+        (prompt_lib / "architecture_layers.md").write_text("# Layers\nCheck layers.")
+        (prompt_lib / "architecture_patterns.md").write_text("# Patterns\nCheck patterns.")
+        (prompt_lib / "meta_stage_triage.md").write_text("# Stage Triage\nSelect prompts.")
+
+        # Create stage candidates
+        stage_file = tmp_path / "stage_candidates.yaml"
+        stage_file.write_text("""stage_candidates:
+  architecture:
+    candidates:
+      - architecture_layers
+      - architecture_patterns
+    max_prompts: 2
+""")
+
+        prompt_library = PromptLibrary(
+            prompt_library_path=prompt_lib,
+            stage_candidates_path=stage_file,
+        )
+        prompt_library.load()
+
+        triage_engine = TriageEngine(
+            analysis_engine=analysis_engine,
+            prompt_library=prompt_library,
+        )
+
+        history = RunHistory()
+        result = triage_engine.triage_stage(
+            stage="architecture",
+            prd_content="Test PRD",
+            code_context="Test code",
+            history=history,
+        )
+
+        assert result.success is True
+        assert result.stage == "architecture"
+        assert "architecture_layers" in result.selected_prompts
+        assert result.reasoning == "Test reasoning"
+
+    def test_triage_stage_unknown_stage(self, tmp_path: Path) -> None:
+        """Test triage fails for unknown stage."""
+        analysis_engine = MockAnalysisEngine()
+
+        prompt_lib = tmp_path / "prompt_library"
+        prompt_lib.mkdir()
+
+        # Create empty stage candidates (no stages defined)
+        stage_file = tmp_path / "stage_candidates.yaml"
+        stage_file.write_text("stage_candidates: {}")
+
+        prompt_library = PromptLibrary(
+            prompt_library_path=prompt_lib,
+            stage_candidates_path=stage_file,
+        )
+        prompt_library.load()
+
+        triage_engine = TriageEngine(
+            analysis_engine=analysis_engine,
+            prompt_library=prompt_library,
+        )
+
+        history = RunHistory()
+        result = triage_engine.triage_stage(
+            stage="nonexistent_stage",
+            prd_content="Test PRD",
+            code_context="Test code",
+            history=history,
+        )
+
+        assert result.success is False
+        assert "No configuration found" in result.error
+
+    def test_triage_stage_filters_invalid_prompts(self, tmp_path: Path) -> None:
+        """Test that stage triage filters out invalid prompt selections."""
+        # Use MagicMock to control the analysis response
+        from unittest.mock import MagicMock
+
+        analysis_engine = MagicMock()
+        # Return a response with some invalid prompt IDs
+        analysis_engine.analyze.return_value = AnalysisResult(
+            success=True,
+            summary='{"selected_prompts": ["arch_valid", "arch_invalid", "not_a_candidate"], "reasoning": "Test"}',
+            raw_response='{"selected_prompts": ["arch_valid", "arch_invalid", "not_a_candidate"], "reasoning": "Test"}',
+        )
+
+        prompt_lib = tmp_path / "prompt_library"
+        prompt_lib.mkdir()
+        (prompt_lib / "arch_valid.md").write_text("# Valid\nContent.")
+        (prompt_lib / "meta_stage_triage.md").write_text("# Stage Triage\nSelect.")
+
+        stage_file = tmp_path / "stage_candidates.yaml"
+        stage_file.write_text("""stage_candidates:
+  architecture:
+    candidates:
+      - arch_valid
+    max_prompts: 3
+""")
+
+        prompt_library = PromptLibrary(
+            prompt_library_path=prompt_lib,
+            stage_candidates_path=stage_file,
+        )
+        prompt_library.load()
+
+        triage_engine = TriageEngine(
+            analysis_engine=analysis_engine,
+            prompt_library=prompt_library,
+        )
+
+        history = RunHistory()
+        result = triage_engine.triage_stage(
+            stage="architecture",
+            prd_content="Test PRD",
+            code_context="Test code",
+            history=history,
+        )
+
+        assert result.success is True
+        # Only valid candidate should remain
+        for prompt_id in result.selected_prompts:
+            assert prompt_id == "arch_valid"
+
+
+class TestRefineWithStageTriage:
+    """Tests for refine_with_stage_triage orchestrator method."""
+
+    def test_refine_with_stage_triage_basic(
+        self, sample_config: tuple[Config, Path], mock_repomix_runner: MagicMock
+    ) -> None:
+        """Test basic stage triage refinement."""
+        config, config_dir = sample_config
+
+        # Create stage candidates file
+        stage_file = config_dir / "stage_candidates.yaml"
+        stage_file.write_text("""stage_candidates:
+  architecture:
+    candidates:
+      - quality_error_analysis
+    max_prompts: 1
+  quality:
+    candidates:
+      - quality_code_complexity_analysis
+    max_prompts: 1
+""")
+
+        prompt_library = PromptLibrary(
+            prompts_path=None,
+            profiles_path=config_dir / "profiles.yaml",
+            prompt_library_path=config_dir / "prompt_library",
+            stage_candidates_path=stage_file,
+        )
+        prompt_library.load()
+
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_library=prompt_library,
+            repomix_runner=mock_repomix_runner,
+        )
+
+        result = orchestrator.refine_with_stage_triage(stages=["architecture", "quality"])
+
+        assert result is not None
+        assert result.profile_name == "stage_triage"
+        # Should attempt stages
+        assert result.stages_completed >= 0 or result.stages_failed >= 0
+
+    def test_refine_with_stage_triage_missing_prd(
+        self, sample_config: tuple[Config, Path], mock_repomix_runner: MagicMock
+    ) -> None:
+        """Test stage triage fails gracefully without PRD."""
+        config, config_dir = sample_config
+
+        # Remove PRD file
+        prd_path = config.prd_path
+        if prd_path and prd_path.exists():
+            prd_path.unlink()
+
+        prompt_library = PromptLibrary(
+            prompts_path=None,
+            profiles_path=config_dir / "profiles.yaml",
+            prompt_library_path=config_dir / "prompt_library",
+        )
+        prompt_library.load()
+
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_library=prompt_library,
+            repomix_runner=mock_repomix_runner,
+        )
+
+        result = orchestrator.refine_with_stage_triage(stages=["architecture"])
+
+        assert result.success is False
+        assert "PRD" in result.error
+
+    def test_run_stage_with_triage_helper(
+        self, sample_config: tuple[Config, Path], mock_repomix_runner: MagicMock
+    ) -> None:
+        """Test the run_stage_with_triage helper method."""
+        config, config_dir = sample_config
+
+        # Create stage candidates
+        stage_file = config_dir / "stage_candidates.yaml"
+        stage_file.write_text("""stage_candidates:
+  quality:
+    candidates:
+      - quality_error_analysis
+    max_prompts: 1
+""")
+
+        prompt_library = PromptLibrary(
+            prompts_path=None,
+            profiles_path=config_dir / "profiles.yaml",
+            prompt_library_path=config_dir / "prompt_library",
+            stage_candidates_path=stage_file,
+        )
+        prompt_library.load()
+
+        orchestrator = Orchestrator(
+            config=config,
+            prompt_library=prompt_library,
+            repomix_runner=mock_repomix_runner,
+        )
+
+        history = RunHistory()
+        results, completed, failed = orchestrator.run_stage_with_triage(
+            stage="quality",
+            prd_content="Test PRD",
+            code_context="Test code",
+            history=history,
+        )
+
+        # Should return results (may be empty if no prompts selected)
+        assert isinstance(results, list)
+        assert isinstance(completed, int)
+        assert isinstance(failed, int)

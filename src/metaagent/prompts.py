@@ -207,6 +207,14 @@ class Profile:
     stages: list[str]
 
 
+@dataclass
+class StageConfig:
+    """Configuration for a conceptual stage's candidate prompts."""
+
+    candidates: list[str]
+    max_prompts: int = 3
+
+
 class PromptLibrary:
     """Manages loading and accessing prompts and profiles."""
 
@@ -215,6 +223,7 @@ class PromptLibrary:
         prompts_path: Optional[Path] = None,
         profiles_path: Optional[Path] = None,
         prompt_library_path: Optional[Path] = None,
+        stage_candidates_path: Optional[Path] = None,
     ):
         """Initialize the prompt library.
 
@@ -222,12 +231,15 @@ class PromptLibrary:
             prompts_path: Path to prompts.yaml file (legacy, optional).
             profiles_path: Path to profiles.yaml file.
             prompt_library_path: Path to directory containing markdown prompts.
+            stage_candidates_path: Path to stage_candidates.yaml file.
         """
         self.prompts_path = prompts_path
         self.profiles_path = profiles_path
         self.prompt_library_path = prompt_library_path
+        self.stage_candidates_path = stage_candidates_path
         self._prompts: dict[str, Prompt] = {}
         self._profiles: dict[str, Profile] = {}
+        self._stage_configs: dict[str, StageConfig] = {}
         self._loaded = False
 
     def load(self) -> None:
@@ -238,13 +250,16 @@ class PromptLibrary:
         logger.info("Loading prompt library...")
         self._load_prompts()
         self._load_profiles()
+        self._load_stage_candidates()
         self._loaded = True
 
         # Log summary of loaded content
         prompt_count = len(self._prompts)
         profile_count = len(self._profiles)
+        stage_config_count = len(self._stage_configs)
         logger.info(
-            f"Prompt library loaded: {prompt_count} prompts, {profile_count} profiles"
+            f"Prompt library loaded: {prompt_count} prompts, {profile_count} profiles, "
+            f"{stage_config_count} stage configs"
         )
 
     def _load_prompts(self) -> None:
@@ -393,6 +408,48 @@ class PromptLibrary:
         except Exception as e:
             logger.warning(f"Failed to load profiles from {self.profiles_path}: {e}")
 
+    def _load_stage_candidates(self) -> None:
+        """Load stage-to-candidate-prompts mapping from YAML.
+
+        Falls back to DEFAULT_STAGE_PROMPTS if no file is provided.
+        """
+        if not self.stage_candidates_path or not self.stage_candidates_path.exists():
+            logger.debug(
+                f"No stage candidates file at: {self.stage_candidates_path}, "
+                "using DEFAULT_STAGE_PROMPTS"
+            )
+            # Fall back to DEFAULT_STAGE_PROMPTS
+            for stage, prompts in DEFAULT_STAGE_PROMPTS.items():
+                self._stage_configs[stage] = StageConfig(candidates=prompts)
+            return
+
+        try:
+            with open(self.stage_candidates_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+
+            stage_candidates = data.get("stage_candidates", {})
+            for stage, config in stage_candidates.items():
+                if isinstance(config, list):
+                    # Simple list format
+                    self._stage_configs[stage] = StageConfig(candidates=config)
+                elif isinstance(config, dict):
+                    # Dict format with candidates and max_prompts
+                    self._stage_configs[stage] = StageConfig(
+                        candidates=config.get("candidates", []),
+                        max_prompts=config.get("max_prompts", 3),
+                    )
+                else:
+                    logger.warning(f"Invalid config format for stage '{stage}'")
+
+            logger.debug(f"Loaded {len(stage_candidates)} stage candidate configs")
+        except Exception as e:
+            logger.warning(
+                f"Failed to load stage candidates from {self.stage_candidates_path}: {e}"
+            )
+            # Fall back to DEFAULT_STAGE_PROMPTS on error
+            for stage, prompts in DEFAULT_STAGE_PROMPTS.items():
+                self._stage_configs[stage] = StageConfig(candidates=prompts)
+
     def get_prompt(self, prompt_id: str) -> Optional[Prompt]:
         """Get a prompt by ID.
 
@@ -516,3 +573,43 @@ class PromptLibrary:
         for profile_id in self._profiles:
             results[profile_id] = self.validate_profile(profile_id)
         return results
+
+    def get_stage_config(self, stage: str) -> Optional[StageConfig]:
+        """Get configuration for a conceptual stage.
+
+        Args:
+            stage: The stage name (e.g., 'architecture', 'quality').
+
+        Returns:
+            StageConfig instance or None if not found.
+        """
+        self.load()
+        return self._stage_configs.get(stage)
+
+    def get_all_candidate_prompts_for_stage(self, stage: str) -> list[Prompt]:
+        """Get all candidate prompts for a stage (for triage to select from).
+
+        Args:
+            stage: The conceptual stage name (e.g., 'architecture', 'quality').
+
+        Returns:
+            List of Prompt instances that are candidates for this stage.
+        """
+        self.load()
+        config = self._stage_configs.get(stage)
+        if not config:
+            return []
+        return [
+            self.get_prompt(pid)
+            for pid in config.candidates
+            if self.get_prompt(pid)
+        ]
+
+    def list_stages(self) -> list[str]:
+        """Get all available stage names.
+
+        Returns:
+            List of stage names from stage_candidates config.
+        """
+        self.load()
+        return list(self._stage_configs.keys())

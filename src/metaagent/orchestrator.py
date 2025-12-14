@@ -80,6 +80,17 @@ class TriageResult:
 
 
 @dataclass
+class StageTriageResult:
+    """Result from stage-specific triage."""
+
+    success: bool
+    stage: str
+    selected_prompts: list[str] = field(default_factory=list)
+    reasoning: str = ""
+    error: Optional[str] = None
+
+
+@dataclass
 class IterationResult:
     """Result from a single iteration of the refinement loop."""
 
@@ -493,6 +504,224 @@ class TriageEngine:
 
         return validated
 
+    def triage_stage(
+        self,
+        stage: str,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> StageTriageResult:
+        """Run triage for a specific stage to select best prompts.
+
+        This method performs AI-driven prompt selection for a single stage,
+        choosing the most relevant prompts from the stage's candidate list.
+
+        Args:
+            stage: The conceptual stage (e.g., 'architecture', 'quality').
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            StageTriageResult with selected prompts for this stage.
+        """
+        logger.info(f"Running triage for stage: {stage}")
+
+        # Get stage configuration
+        stage_config = self.prompt_library.get_stage_config(stage)
+        if not stage_config:
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error=f"No configuration found for stage: {stage}",
+            )
+
+        # Get candidate prompts for this stage
+        candidates = self.prompt_library.get_all_candidate_prompts_for_stage(stage)
+        if not candidates:
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error=f"No candidate prompts found for stage: {stage}",
+            )
+
+        logger.debug(f"Stage {stage} has {len(candidates)} candidate prompts")
+
+        # Build stage-specific triage prompt
+        triage_prompt = self._build_stage_triage_prompt(
+            stage=stage,
+            candidates=candidates,
+            max_prompts=stage_config.max_prompts,
+            prd_content=prd_content,
+            code_context=code_context,
+            history=history,
+        )
+
+        # Run triage
+        result = self.analysis_engine.analyze(triage_prompt)
+        if not result.success:
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error=result.error,
+            )
+
+        return self._parse_stage_triage_response(stage, result, candidates)
+
+    def _build_stage_triage_prompt(
+        self,
+        stage: str,
+        candidates: list[Prompt],
+        max_prompts: int,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> str:
+        """Build a prompt for stage-specific triage.
+
+        Args:
+            stage: The stage name.
+            candidates: List of candidate Prompt objects.
+            max_prompts: Maximum prompts to select.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            Rendered triage prompt string.
+        """
+        # Build candidates list
+        candidates_list = "\n".join(
+            f"- `{p.id}`: {p.goal}" for p in candidates
+        )
+
+        # Get the stage triage prompt template
+        triage_prompt = self.prompt_library.get_prompt("meta_stage_triage")
+
+        if triage_prompt:
+            # Use the template with Jinja2 substitution
+            from jinja2 import Template
+            template = Template(triage_prompt.template)
+            prompt_text = template.render(
+                stage=stage,
+                candidates_list=candidates_list,
+                max_prompts=max_prompts,
+            )
+        else:
+            # Fallback to inline prompt if template not found
+            prompt_text = f"""# Stage-Specific Prompt Selection
+
+**Stage:** {stage}
+
+Select the most relevant analysis prompts for this stage from the candidates below.
+
+## Candidate Prompts
+
+{candidates_list}
+
+## Instructions
+
+1. Review the codebase and PRD
+2. Select up to {max_prompts} prompts that would provide the most value
+3. Prioritize prompts addressing gaps between code and PRD
+
+## Response Format (JSON only)
+
+```json
+{{
+  "selected_prompts": ["prompt_id_1", "prompt_id_2"],
+  "reasoning": "Brief explanation of selections"
+}}
+```
+"""
+
+        # Build full context with PRD and codebase
+        context_sections = []
+        if prd_content:
+            context_sections.append(f"## Product Requirements Document (PRD)\n\n{prd_content}")
+        if code_context:
+            context_sections.append(f"## Codebase\n\n{code_context}")
+        if history.entries:
+            context_sections.append(f"## Previous Analysis\n\n{history.format_for_prompt()}")
+
+        context_block = "\n\n---\n\n".join(context_sections) if context_sections else ""
+
+        # Combine context with prompt
+        if context_block:
+            return f"{context_block}\n\n---\n\n{prompt_text}"
+        return prompt_text
+
+    def _parse_stage_triage_response(
+        self,
+        stage: str,
+        analysis_result: AnalysisResult,
+        candidates: list[Prompt],
+    ) -> StageTriageResult:
+        """Parse the stage triage response.
+
+        Args:
+            stage: The stage name.
+            analysis_result: Raw analysis result from the LLM.
+            candidates: List of valid candidate prompts.
+
+        Returns:
+            Parsed StageTriageResult.
+        """
+        # Get response text
+        response_text = analysis_result.summary
+        if not response_text or not response_text.strip():
+            response_text = analysis_result.raw_response
+
+        if not response_text:
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error="Empty stage triage response",
+            )
+
+        logger.debug(f"Stage triage response (first 500 chars): {response_text[:500]}")
+
+        # Extract JSON
+        data, extract_error = extract_json_from_response(response_text)
+
+        if data is None:
+            logger.warning(f"Stage triage JSON extraction failed: {extract_error}")
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error=f"Could not parse stage triage response: {extract_error}",
+            )
+
+        # Validate selected_prompts field
+        selected = data.get("selected_prompts", [])
+        if not isinstance(selected, list):
+            return StageTriageResult(
+                success=False,
+                stage=stage,
+                error="'selected_prompts' must be a list",
+            )
+
+        # Filter to only valid candidate prompt IDs
+        valid_ids = {p.id for p in candidates}
+        validated = []
+        for prompt_id in selected:
+            if not isinstance(prompt_id, str):
+                continue
+            if prompt_id in valid_ids:
+                validated.append(prompt_id)
+            else:
+                logger.warning(
+                    f"Stage triage selected invalid prompt '{prompt_id}' "
+                    f"for stage '{stage}'"
+                )
+
+        return StageTriageResult(
+            success=True,
+            stage=stage,
+            selected_prompts=validated,
+            reasoning=data.get("reasoning", ""),
+        )
+
 
 class ImplementationExecutor:
     """Handles Claude Code integration and git commits.
@@ -850,6 +1079,7 @@ class Orchestrator:
             prompts_path=config.prompts_file,
             profiles_path=config.profiles_file,
             prompt_library_path=config.prompt_library_path,
+            stage_candidates_path=config.stage_candidates_file,
         )
 
         self.repomix_runner = repomix_runner or RepomixRunner(
@@ -1182,6 +1412,186 @@ class Orchestrator:
             stage_results=all_stage_results,
             iterations=iterations,
             partial_success=stages_failed > 0 and stages_completed > 0,
+        )
+
+    def refine_with_stage_triage(self, stages: list[str]) -> RefinementResult:
+        """Run refinement with AI-driven prompt selection per stage.
+
+        This mode runs triage for each conceptual stage to dynamically select
+        the most relevant prompts from the full prompt library.
+
+        For each stage:
+        1. Get candidate prompts for that stage from stage_candidates.yaml
+        2. Run triage to select the best prompts for this codebase
+        3. Execute the selected prompts
+        4. Aggregate results into the final plan
+
+        Args:
+            stages: List of conceptual stage names (e.g., ['architecture', 'quality']).
+
+        Returns:
+            RefinementResult with the outcome.
+        """
+        logger.info(f"Starting stage-aware refinement with stages: {stages}")
+        logger.info(f"Target repo: {self.config.repo_path}")
+
+        # Load PRD from TARGET repo
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return RefinementResult(
+                success=False,
+                profile_name="stage_triage",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Pack the TARGET repo codebase
+        logger.info("Packing target codebase...")
+        code_context = self._pack_codebase()
+
+        history = RunHistory()
+        all_stage_results: list[StageResult] = []
+        stages_completed = 0
+        stages_failed = 0
+        triage_calls = 0
+        analysis_calls = 0
+
+        for stage in stages:
+            logger.info(f"=== Processing stage: {stage} ===")
+
+            # Run triage for this stage
+            logger.info(f"Running triage for stage '{stage}'...")
+            triage_result = self.triage_engine.triage_stage(
+                stage=stage,
+                prd_content=prd_content,
+                code_context=code_context,
+                history=history,
+            )
+            triage_calls += 1
+
+            if not triage_result.success:
+                logger.error(f"Triage failed for stage '{stage}': {triage_result.error}")
+                stages_failed += 1
+                continue
+
+            if not triage_result.selected_prompts:
+                logger.info(f"No prompts selected for stage '{stage}', skipping")
+                continue
+
+            logger.info(
+                f"Stage '{stage}' selected prompts: {triage_result.selected_prompts}"
+            )
+            logger.info(f"Reasoning: {triage_result.reasoning}")
+
+            # Get the selected prompts
+            prompts = [
+                self.prompt_library.get_prompt(pid)
+                for pid in triage_result.selected_prompts
+                if self.prompt_library.get_prompt(pid)
+            ]
+
+            if not prompts:
+                logger.warning(f"No valid prompts found for stage '{stage}'")
+                continue
+
+            # Run the selected prompts
+            stage_results, completed, failed = self.stage_runner.run_stages(
+                prompts=prompts,
+                prd_content=prd_content,
+                code_context=code_context,
+                history=history,
+            )
+
+            all_stage_results.extend(stage_results)
+            stages_completed += completed
+            stages_failed += failed
+            analysis_calls += len(prompts)
+
+        # Write plan
+        plan_path = None
+        if all_stage_results:
+            logger.info("Writing improvement plan...")
+            plan_path = self.plan_writer.write_plan(
+                prd_content=prd_content,
+                profile_name=f"Stage Triage ({', '.join(stages)})",
+                stage_results=all_stage_results,
+            )
+            logger.info(f"Plan written to: {plan_path}")
+
+        total_calls = triage_calls + analysis_calls
+        logger.info(
+            f"Stage triage complete: {triage_calls} triage calls, "
+            f"{analysis_calls} analysis calls, {total_calls} total API calls"
+        )
+
+        return RefinementResult(
+            success=stages_failed == 0 and stages_completed > 0,
+            profile_name="stage_triage",
+            stages_completed=stages_completed,
+            stages_failed=stages_failed,
+            plan_path=plan_path,
+            stage_results=all_stage_results,
+            partial_success=stages_failed > 0 and stages_completed > 0,
+        )
+
+    def run_stage_with_triage(
+        self,
+        stage: str,
+        prd_content: str,
+        code_context: str,
+        history: RunHistory,
+    ) -> tuple[list[StageResult], int, int]:
+        """Run a single stage with AI-driven prompt selection.
+
+        This helper method:
+        1. Runs triage to select prompts for the stage
+        2. Executes the selected prompts
+        3. Returns the results
+
+        Args:
+            stage: The conceptual stage name.
+            prd_content: The PRD content.
+            code_context: The packed codebase.
+            history: Previous analysis history.
+
+        Returns:
+            Tuple of (stage_results, completed_count, failed_count).
+        """
+        # Run triage for this stage
+        triage_result = self.triage_engine.triage_stage(
+            stage=stage,
+            prd_content=prd_content,
+            code_context=code_context,
+            history=history,
+        )
+
+        if not triage_result.success:
+            logger.error(f"Triage failed for stage '{stage}': {triage_result.error}")
+            return [], 0, 1
+
+        if not triage_result.selected_prompts:
+            logger.info(f"No prompts selected for stage '{stage}'")
+            return [], 0, 0
+
+        logger.info(f"Stage '{stage}' selected: {triage_result.selected_prompts}")
+
+        # Get the selected prompts
+        prompts = [
+            self.prompt_library.get_prompt(pid)
+            for pid in triage_result.selected_prompts
+            if self.prompt_library.get_prompt(pid)
+        ]
+
+        if not prompts:
+            return [], 0, 0
+
+        # Run the selected prompts
+        return self.stage_runner.run_stages(
+            prompts=prompts,
+            prd_content=prd_content,
+            code_context=code_context,
+            history=history,
         )
 
     def _pack_codebase(self) -> str:
