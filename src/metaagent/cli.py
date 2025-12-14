@@ -380,7 +380,7 @@ def refine_iterative(
         console.print("\n[bold]Iteration Summary:[/bold]")
         for iteration in result.iterations:
             prompts = ", ".join(iteration.prompts_run) if iteration.prompts_run else "none"
-            status = "[green]✓[/green]" if iteration.changes_made else "[dim]-[/dim]"
+            status = "[green]+[/green]" if iteration.changes_made else "[dim]-[/dim]"
             console.print(f"  {status} Iteration {iteration.iteration}: {prompts}")
 
     if result.plan_path:
