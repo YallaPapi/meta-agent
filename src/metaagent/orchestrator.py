@@ -28,7 +28,13 @@ from .analysis import (
     create_analysis_engine,
     extract_json_from_response,
 )
-from .claude_runner import ClaudeCodeRunner, ClaudeCodeResult, MockClaudeCodeRunner
+from .claude_runner import (
+    ClaudeCodeRunner,
+    ClaudeCodeResult,
+    ImplementationReport,
+    MockClaudeCodeRunner,
+    TaskAnalysis,
+)
 from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
 from .plan_writer import PlanWriter, StageResult
@@ -782,6 +788,100 @@ class ImplementationExecutor:
             logger.info("Or use --auto-implement to run Claude Code automatically.")
             return True  # Tasks were written
 
+    def analyze_and_report(self, stage_results: list[StageResult]) -> ImplementationReport:
+        """Analyze stage results and return structured implementation report.
+
+        This method replaces subprocess-based execution. Instead of spawning
+        Claude Code as a subprocess, it returns structured data that the
+        CURRENT Claude Code session can use to implement changes.
+
+        Args:
+            stage_results: Results from analysis stages.
+
+        Returns:
+            ImplementationReport with tasks and recommendations.
+        """
+        if not stage_results:
+            return ImplementationReport(
+                success=True,
+                tasks=[],
+                implementation_plan="No analysis results to process.",
+            )
+
+        # Collect all tasks from stage results
+        all_tasks: list[TaskAnalysis] = []
+        task_id = 1
+
+        for result in stage_results:
+            for task_dict in result.tasks:
+                if isinstance(task_dict, dict):
+                    task = TaskAnalysis(
+                        task_id=f"task-{task_id}",
+                        title=task_dict.get("title", "Untitled"),
+                        description=task_dict.get("description", str(task_dict)),
+                        priority=task_dict.get("priority", "medium"),
+                        affected_files=[task_dict.get("file", "")] if task_dict.get("file") else [],
+                    )
+                    all_tasks.append(task)
+                    task_id += 1
+                else:
+                    # Handle string tasks
+                    task = TaskAnalysis(
+                        task_id=f"task-{task_id}",
+                        title=str(task_dict),
+                        description=str(task_dict),
+                        priority="medium",
+                    )
+                    all_tasks.append(task)
+                    task_id += 1
+
+        # Write tasks to file for reference
+        tasks_for_file = [
+            {
+                "title": t.title,
+                "description": t.description,
+                "priority": t.priority,
+                "file": t.affected_files[0] if t.affected_files else "",
+            }
+            for t in all_tasks
+        ]
+        prompt_file = self._write_task_file(tasks_for_file)
+        logger.info(f"Implementation tasks written to: {prompt_file}")
+
+        # Build implementation plan
+        plan_lines = [
+            "## Implementation Plan",
+            "",
+            "Tasks are sorted by priority.",
+            "",
+        ]
+        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        sorted_tasks = sorted(all_tasks, key=lambda t: priority_order.get(t.priority, 2))
+
+        for i, task in enumerate(sorted_tasks, 1):
+            plan_lines.append(f"{i}. **[{task.priority.upper()}]** {task.title}")
+            if task.affected_files:
+                plan_lines.append(f"   - Files: {', '.join(task.affected_files)}")
+
+        # Estimate effort
+        effort_map = {"low": 0.5, "medium": 2, "high": 8, "critical": 4}
+        total_hours = sum(effort_map.get(t.priority, 2) for t in all_tasks)
+        if total_hours <= 1:
+            effort = "< 1 hour"
+        elif total_hours <= 4:
+            effort = "1-4 hours"
+        elif total_hours <= 8:
+            effort = "4-8 hours"
+        else:
+            effort = f"{int(total_hours / 8)}-{int(total_hours / 4)} days"
+
+        return ImplementationReport(
+            tasks=all_tasks,
+            implementation_plan="\n".join(plan_lines),
+            success=True,
+            total_estimated_effort=effort,
+        )
+
     def _write_task_file(self, tasks: list) -> Path:
         """Write tasks to a markdown file for Claude Code.
 
@@ -1205,6 +1305,15 @@ class Orchestrator:
                 stage_results=stage_results,
             )
             logger.info(f"Plan written to: {plan_path}")
+
+        # Execute implementation if auto_implement is enabled
+        if self.config.auto_implement and stage_results:
+            logger.info("Auto-implementing changes with Claude Code...")
+            changes_made = self.implementation_executor.execute(stage_results)
+            if changes_made:
+                logger.info("Implementation completed successfully")
+            else:
+                logger.warning("No changes were made during implementation")
 
         return RefinementResult(
             success=stages_failed == 0 and stages_completed > 0,
