@@ -27,6 +27,16 @@ class Config:
     timeout: int = 120
     max_tokens: int = 100000
 
+    # Claude Code Settings
+    claude_code_timeout: int = 600  # 10 minutes for implementation
+    claude_code_model: str = "claude-sonnet-4-20250514"
+    claude_code_max_turns: int = 50
+    auto_implement: bool = False  # Whether to auto-invoke Claude Code
+
+    # Git/Commit Settings
+    auto_commit: bool = True  # Whether to auto-commit after implementation
+    auto_push: bool = False  # Whether to auto-push after commit (disabled by default for safety)
+
     # Runtime Settings
     log_level: str = "INFO"
     mock_mode: bool = False
@@ -53,6 +63,12 @@ class Config:
             prd_path=repo / "docs" / "prd.md",
             timeout=int(os.getenv("METAAGENT_TIMEOUT", "120")),
             max_tokens=int(os.getenv("METAAGENT_MAX_TOKENS", "100000")),
+            claude_code_timeout=int(os.getenv("METAAGENT_CLAUDE_TIMEOUT", "600")),
+            claude_code_model=os.getenv("METAAGENT_CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+            claude_code_max_turns=int(os.getenv("METAAGENT_CLAUDE_MAX_TURNS", "50")),
+            auto_implement=os.getenv("METAAGENT_AUTO_IMPLEMENT", "").lower() in ("true", "1", "yes"),
+            auto_commit=os.getenv("METAAGENT_AUTO_COMMIT", "true").lower() in ("true", "1", "yes"),
+            auto_push=os.getenv("METAAGENT_AUTO_PUSH", "").lower() in ("true", "1", "yes"),
             log_level=os.getenv("METAAGENT_LOG_LEVEL", "INFO"),
             mock_mode=os.getenv("METAAGENT_MOCK_MODE", "").lower() in ("true", "1", "yes"),
         )

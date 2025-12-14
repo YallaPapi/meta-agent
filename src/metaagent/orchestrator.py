@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .analysis import AnalysisEngine, AnalysisResult, create_analysis_engine
+from .claude_runner import ClaudeCodeRunner, ClaudeCodeResult, MockClaudeCodeRunner
 from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
 from .plan_writer import PlanWriter, StageResult
@@ -97,6 +98,7 @@ class Orchestrator:
         digest_runner: Optional[CodebaseDigestRunner] = None,
         analysis_engine: Optional[AnalysisEngine] = None,
         plan_writer: Optional[PlanWriter] = None,
+        claude_runner: Optional[ClaudeCodeRunner] = None,
     ):
         """Initialize the orchestrator.
 
@@ -107,6 +109,7 @@ class Orchestrator:
             digest_runner: Optional CodebaseDigestRunner instance.
             analysis_engine: Optional AnalysisEngine instance.
             plan_writer: Optional PlanWriter instance.
+            claude_runner: Optional ClaudeCodeRunner instance.
         """
         self.config = config
 
@@ -137,6 +140,22 @@ class Orchestrator:
         self.plan_writer = plan_writer or PlanWriter(
             output_dir=config.repo_path / "docs",
         )
+
+        # Initialize Claude Code runner
+        if claude_runner:
+            self.claude_runner = claude_runner
+        elif config.mock_mode:
+            self.claude_runner = MockClaudeCodeRunner(
+                timeout=config.claude_code_timeout,
+                model=config.claude_code_model,
+                max_turns=config.claude_code_max_turns,
+            )
+        else:
+            self.claude_runner = ClaudeCodeRunner(
+                timeout=config.claude_code_timeout,
+                model=config.claude_code_model,
+                max_turns=config.claude_code_max_turns,
+            )
 
     def refine(self, profile_id: str) -> RefinementResult:
         """Run the refinement pipeline for a profile.
@@ -366,7 +385,8 @@ class Orchestrator:
             if changes_made:
                 logger.info("Step 5: Committing changes to GitHub...")
                 commit_hash = self._commit_changes(
-                    f"Iteration {iteration}: {', '.join(triage_result.selected_prompts)}"
+                    f"Iteration {iteration}: improvements from AI analysis",
+                    prompt_ids=triage_result.selected_prompts,
                 )
 
             iterations.append(
@@ -468,7 +488,14 @@ class Orchestrator:
         # Parse the triage response
         try:
             # Try to extract JSON from the response
+            # Use raw_response if summary is empty (happens when API returns JSON
+            # with different keys than the standard analysis format)
             response_text = analysis_result.summary
+            if not response_text or not response_text.strip():
+                response_text = analysis_result.raw_response
+
+            logger.debug(f"Triage raw response length: {len(analysis_result.raw_response) if analysis_result.raw_response else 0}")
+            logger.debug(f"Triage response text (first 500 chars): {response_text[:500] if response_text else 'Empty'}")
 
             # Look for JSON in the response
             json_start = response_text.find("{")
@@ -550,32 +577,64 @@ class Orchestrator:
         implementation_prompt = "Please implement the following improvements:\n\n"
         for i, task in enumerate(tasks, 1):
             if isinstance(task, dict):
-                implementation_prompt += f"{i}. {task.get('description', task)}\n"
+                title = task.get("title", "")
+                desc = task.get("description", str(task))
+                file_ref = task.get("file", "")
+                if title:
+                    implementation_prompt += f"{i}. **{title}**"
+                    if file_ref:
+                        implementation_prompt += f" ({file_ref})"
+                    implementation_prompt += f"\n   {desc}\n\n"
+                else:
+                    implementation_prompt += f"{i}. {desc}\n\n"
             else:
-                implementation_prompt += f"{i}. {task}\n"
+                implementation_prompt += f"{i}. {task}\n\n"
 
         # Write the prompt to a file for Claude Code to read
         prompt_file = self.config.repo_path / ".meta-agent-tasks.md"
         prompt_file.write_text(implementation_prompt, encoding="utf-8")
 
         logger.info(f"Implementation tasks written to: {prompt_file}")
-        logger.info("Please run Claude Code to implement these changes.")
 
-        # In a fully automated setup, we would call Claude Code here
-        # For now, we just write the tasks and let the user run Claude Code
-        # TODO: Integrate with Claude Code CLI when available
+        # If auto_implement is enabled, invoke Claude Code
+        if self.config.auto_implement:
+            logger.info("Auto-implementing with Claude Code...")
 
-        return True
+            result = self.claude_runner.implement(
+                repo_path=self.config.repo_path,
+                prompt=implementation_prompt,
+                plan_file=self.config.repo_path / "docs" / "mvp_improvement_plan.md",
+            )
 
-    def _commit_changes(self, message: str) -> Optional[str]:
+            if result.success:
+                logger.info(f"Claude Code completed. Files modified: {len(result.files_modified)}")
+                for f in result.files_modified:
+                    logger.debug(f"  Modified: {f}")
+                return len(result.files_modified) > 0
+            else:
+                logger.error(f"Claude Code failed: {result.error}")
+                return False
+        else:
+            logger.info("Please run Claude Code to implement these changes.")
+            logger.info("Or use --auto-implement to run Claude Code automatically.")
+            # Return True to indicate tasks were written (even if not auto-implemented)
+            return True
+
+    def _commit_changes(self, message: str, prompt_ids: Optional[list[str]] = None) -> Optional[str]:
         """Commit changes to git.
 
         Args:
             message: Commit message.
+            prompt_ids: Optional list of prompt IDs to reference in commit.
 
         Returns:
             Commit hash if successful, None otherwise.
         """
+        # Check if auto-commit is disabled
+        if not self.config.auto_commit:
+            logger.info("Auto-commit disabled, skipping commit")
+            return None
+
         try:
             # Check if there are changes to commit
             status_result = subprocess.run(
@@ -596,8 +655,8 @@ class Orchestrator:
                 check=True,
             )
 
-            # Commit
-            commit_message = f"meta-agent: {message}\n\n🤖 Generated with meta-agent"
+            # Build commit message with prompt references
+            commit_message = self._build_commit_message(message, prompt_ids)
             subprocess.run(
                 ["git", "commit", "-m", commit_message],
                 cwd=self.config.repo_path,
@@ -615,19 +674,45 @@ class Orchestrator:
             commit_hash = hash_result.stdout.strip()[:8]
             logger.info(f"Committed changes: {commit_hash}")
 
-            # Push to remote
-            subprocess.run(
-                ["git", "push"],
-                cwd=self.config.repo_path,
-                check=True,
-            )
-            logger.info("Pushed to remote")
+            # Only push if auto_push is enabled
+            if self.config.auto_push:
+                try:
+                    subprocess.run(
+                        ["git", "push"],
+                        cwd=self.config.repo_path,
+                        check=True,
+                        timeout=60,
+                    )
+                    logger.info("Pushed to remote")
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    logger.warning(f"Failed to push: {e}")
 
             return commit_hash
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Git operation failed: {e}")
             return None
+
+    def _build_commit_message(self, message: str, prompt_ids: Optional[list[str]] = None) -> str:
+        """Build a commit message with prompt references.
+
+        Args:
+            message: Base message.
+            prompt_ids: Optional list of prompt IDs.
+
+        Returns:
+            Formatted commit message.
+        """
+        lines = [f"meta-agent: {message}"]
+
+        if prompt_ids:
+            lines.append("")
+            lines.append(f"Prompts: {', '.join(prompt_ids)}")
+
+        lines.append("")
+        lines.append("Generated with meta-agent")
+
+        return "\n".join(lines)
 
     def _load_prd(self) -> Optional[str]:
         """Load the PRD file content.

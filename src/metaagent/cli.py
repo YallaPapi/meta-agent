@@ -133,6 +133,12 @@ def refine(
         "-m",
         help="Run in mock mode (no API calls).",
     ),
+    auto_implement: bool = typer.Option(
+        False,
+        "--auto-implement",
+        "-a",
+        help="Automatically run Claude Code to implement changes.",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -180,6 +186,9 @@ def refine(
 
     if mock:
         config.mock_mode = True
+
+    if auto_implement:
+        config.auto_implement = True
 
     # Validate configuration
     errors = config.validate()
@@ -274,6 +283,22 @@ def refine_iterative(
         "-m",
         help="Run in mock mode (no API calls).",
     ),
+    auto_implement: bool = typer.Option(
+        False,
+        "--auto-implement",
+        "-a",
+        help="Automatically run Claude Code to implement changes.",
+    ),
+    no_commit: bool = typer.Option(
+        False,
+        "--no-commit",
+        help="Skip auto-committing changes after implementation.",
+    ),
+    auto_push: bool = typer.Option(
+        False,
+        "--auto-push",
+        help="Automatically push commits to remote (default: disabled for safety).",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -324,6 +349,15 @@ def refine_iterative(
 
     if mock:
         config.mock_mode = True
+
+    if auto_implement:
+        config.auto_implement = True
+
+    if no_commit:
+        config.auto_commit = False
+
+    if auto_push:
+        config.auto_push = True
 
     # Validate configuration
     errors = config.validate()
