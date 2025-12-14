@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -34,34 +35,27 @@ class TestCLI:
         result = runner.invoke(app, ["refine", "--help"])
 
         assert result.exit_code == 0
-        assert "--profile" in result.stdout
         assert "--repo" in result.stdout
         assert "--mock" in result.stdout
-
-    def test_refine_missing_profile(self) -> None:
-        """Test refine command without profile."""
-        result = runner.invoke(app, ["refine"])
-
-        assert result.exit_code != 0
-        # Check both stdout and the combined output (Typer may output to stderr)
-        output = result.stdout + (result.output if hasattr(result, 'output') else "")
-        assert "Missing option" in output or "required" in output.lower() or result.exit_code == 2
+        assert "--max-iterations" in result.stdout
+        assert "iterative refinement" in result.stdout.lower()
 
     def test_refine_invalid_repo(self, tmp_path: Path) -> None:
         """Test refine command with invalid repository path."""
         result = runner.invoke(
             app,
-            ["refine", "--profile", "test", "--repo", str(tmp_path / "nonexistent")],
+            ["refine", "--repo", str(tmp_path / "nonexistent")],
         )
 
         assert result.exit_code != 0
-        assert "does not exist" in result.stdout
+        output = result.stdout + (result.output if hasattr(result, 'output') else "")
+        assert "does not exist" in output
 
     def test_refine_missing_config(self, tmp_path: Path) -> None:
         """Test refine command with missing config directory."""
         result = runner.invoke(
             app,
-            ["refine", "--profile", "test", "--repo", str(tmp_path)],
+            ["refine", "--repo", str(tmp_path)],
         )
 
         assert result.exit_code != 0
@@ -77,26 +71,32 @@ class TestCLI:
 
     def test_refine_mock_mode(self, mock_config, tmp_path: Path) -> None:
         """Test refine command in mock mode."""
-        # Set up config files in temp repo
-        config_dir = mock_config.config_dir
         repo_path = mock_config.repo_path
 
-        result = runner.invoke(
-            app,
-            [
-                "refine",
-                "--profile",
-                "test_profile",
-                "--repo",
-                str(repo_path),
-                "--config-dir",
-                str(config_dir),
-                "--mock",
-            ],
-        )
+        # Mock the orchestrator to avoid actual execution
+        with patch("metaagent.cli.Orchestrator") as mock_orch:
+            from metaagent.orchestrator import RefinementResult
+            mock_instance = mock_orch.return_value
+            mock_instance.refine.return_value = RefinementResult(
+                success=True,
+                profile_name="iterative",
+                stages_completed=1,
+                stages_failed=0,
+                iterations=[],
+            )
 
-        # Should succeed with mock mode
-        assert result.exit_code == 0 or "completed" in result.stdout.lower()
+            result = runner.invoke(
+                app,
+                [
+                    "refine",
+                    "--repo",
+                    str(repo_path),
+                    "--mock",
+                ],
+            )
+
+            # Should succeed with mock mode
+            assert result.exit_code == 0 or "completed" in result.stdout.lower()
 
     def test_list_profiles(self, mock_config) -> None:
         """Test list-profiles command."""
@@ -109,3 +109,15 @@ class TestCLI:
 
         assert result.exit_code == 0
         assert "Test Profile" in result.stdout
+
+    def test_list_prompts(self, mock_config) -> None:
+        """Test list-prompts command."""
+        config_dir = mock_config.config_dir
+
+        result = runner.invoke(
+            app,
+            ["list-prompts", "--config-dir", str(config_dir)],
+        )
+
+        # Should work even with empty prompt library
+        assert result.exit_code == 0

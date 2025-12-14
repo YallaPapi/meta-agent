@@ -138,10 +138,10 @@ class Orchestrator:
             output_dir=config.repo_path / "docs",
         )
 
-    def refine_iterative(self, max_iterations: int = 10) -> RefinementResult:
+    def refine(self, max_iterations: int = 10) -> RefinementResult:
         """Run the iterative refinement loop.
 
-        This is the main entry point for the new architecture:
+        This is the main entry point:
         1. Pack codebase
         2. Triage (AI decides which prompts to run)
         3. Run selected prompts
@@ -496,116 +496,6 @@ class Orchestrator:
         except subprocess.CalledProcessError as e:
             logger.error(f"Git operation failed: {e}")
             return None
-
-    # Legacy method for backwards compatibility
-    def refine(self, profile_id: str) -> RefinementResult:
-        """Run the refinement pipeline for a profile (legacy batch mode).
-
-        Args:
-            profile_id: ID of the profile to use.
-
-        Returns:
-            RefinementResult with the outcome.
-        """
-        logger.info(f"Starting refinement with profile: {profile_id}")
-
-        # Load PRD
-        prd_content = self._load_prd()
-        if prd_content is None:
-            return RefinementResult(
-                success=False,
-                profile_name=profile_id,
-                stages_completed=0,
-                stages_failed=0,
-                error=f"PRD file not found: {self.config.prd_path}",
-            )
-
-        # Get profile
-        profile = self.prompt_library.get_profile(profile_id)
-        if not profile:
-            return RefinementResult(
-                success=False,
-                profile_name=profile_id,
-                stages_completed=0,
-                stages_failed=0,
-                error=f"Profile not found: {profile_id}",
-            )
-
-        # Pack codebase
-        code_context = self._pack_codebase()
-
-        # Run stages
-        history = RunHistory()
-        stage_results: list[StageResult] = []
-        stages_completed = 0
-        stages_failed = 0
-
-        prompts = self.prompt_library.get_prompts_for_profile(profile_id)
-        if not prompts:
-            logger.warning(f"No prompts found for profile: {profile_id}")
-
-        for prompt in prompts:
-            logger.info(f"Running stage: {prompt.id}")
-
-            # Render prompt with context
-            rendered_prompt = prompt.render(
-                prd=prd_content,
-                code_context=code_context,
-                history=history.format_for_prompt(),
-                current_stage=prompt.id,
-            )
-
-            # Run analysis
-            analysis_result = self.analysis_engine.analyze(rendered_prompt)
-
-            if analysis_result.success:
-                stages_completed += 1
-                history.add_entry(prompt.id, analysis_result.summary)
-
-                stage_results.append(
-                    StageResult(
-                        stage_id=prompt.id,
-                        stage_name=prompt.goal or prompt.id,
-                        summary=analysis_result.summary,
-                        recommendations=analysis_result.recommendations,
-                        tasks=analysis_result.tasks,
-                    )
-                )
-                logger.info(f"Stage {prompt.id} completed successfully")
-            else:
-                stages_failed += 1
-                logger.error(f"Stage {prompt.id} failed: {analysis_result.error}")
-
-                # Add partial result for failed stage
-                stage_results.append(
-                    StageResult(
-                        stage_id=prompt.id,
-                        stage_name=prompt.goal or prompt.id,
-                        summary=f"Stage failed: {analysis_result.error}",
-                        recommendations=[],
-                        tasks=[],
-                    )
-                )
-
-        # Write plan
-        plan_path = None
-        if stage_results:
-            logger.info("Writing improvement plan...")
-            plan_path = self.plan_writer.write_plan(
-                prd_content=prd_content,
-                profile_name=profile.name,
-                stage_results=stage_results,
-            )
-            logger.info(f"Plan written to: {plan_path}")
-
-        return RefinementResult(
-            success=stages_failed == 0 and stages_completed > 0,
-            profile_name=profile.name,
-            stages_completed=stages_completed,
-            stages_failed=stages_failed,
-            plan_path=plan_path,
-            stage_results=stage_results,
-        )
 
     def _load_prd(self) -> Optional[str]:
         """Load the PRD file content.
