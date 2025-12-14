@@ -1,4 +1,23 @@
+# =============================================================================
+# LEGACY PROMPTS (prompts.yaml)
+# =============================================================================
+# These are lightweight custom prompts with built-in JSON schema.
+# For comprehensive analysis, use Codebase Digest prompts from prompt_library/*.md
+#
+# Codebase Digest prompts provide more thorough analysis and are the primary
+# prompt source. These YAML prompts are kept for backwards compatibility and
+# as lightweight alternatives when full analysis isn't needed.
+#
+# Recommended Codebase Digest equivalents:
+#   - alignment_with_prd -> meta_triage (for PRD assessment)
+#   - architecture_sanity -> architecture_layer_identification, architecture_coupling_cohesion_analysis
+#   - core_flow_hardening -> quality_error_analysis, quality_risk_assessment
+#   - test_suite_mvp -> testing_unit_test_generation
+#   - security_review -> security_vulnerability_analysis
+# =============================================================================
+
 prompts:
+  # Legacy prompt: Use meta_triage for comprehensive PRD assessment
   alignment_with_prd:
     id: alignment_with_prd
     goal: "Identify gaps between current implementation and PRD requirements"

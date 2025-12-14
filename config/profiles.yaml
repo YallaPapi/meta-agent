@@ -1,4 +1,13 @@
 profiles:
+  # PRD-focused profile for validating implementation against requirements
+  prd_alignment:
+    name: "PRD Alignment Check"
+    description: "Validate implementation against PRD requirements. Uses triage to assess current state, then runs quality and best practice checks."
+    stages:
+      - meta_triage
+      - quality_error_analysis
+      - improvement_best_practice_analysis
+
   automation_agent:
     name: "Automation Agent"
     description: "Profile for CLI tools and automation agents. Focuses on architecture, quality, and testing."
