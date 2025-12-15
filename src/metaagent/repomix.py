@@ -59,6 +59,10 @@ class RepomixRunner:
                 # Try repomix directly first (if installed globally)
                 # Fall back to npx repomix if direct call fails
                 # Use list-based commands to avoid shell injection vulnerabilities
+                #
+                # Note: No default ignores - we pack the full codebase.
+                # Ollama handles the full context locally (free, no token limits),
+                # then sends only relevant findings to Perplexity.
                 cmd_options = [
                     ["repomix", "--output", str(output_path), "--style", "markdown"],
                     ["npx", "repomix", "--output", str(output_path), "--style", "markdown"],

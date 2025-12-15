@@ -38,9 +38,11 @@ from .claude_runner import (
 )
 from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
+from .ollama_engine import OllamaEngine, TriageOutput, check_ollama_status
 from .plan_writer import PlanWriter, StageResult
 from .prompts import Prompt, PromptLibrary
 from .repomix import RepomixRunner, RepomixResult
+from .repomix_parser import extract_files, get_file_list
 from .strategies import (
     CodeImplementationStrategy,
     CurrentSessionStrategy,
@@ -398,6 +400,38 @@ class TriageEngine:
         self.prompt_library = prompt_library
         self.max_prompts_per_iteration = max_prompts_per_iteration
 
+    def build_prompt_index(self) -> str:
+        """Build a lightweight index of all available prompts.
+
+        Returns a formatted string with prompt ID and goal for each prompt,
+        organized by category. This is injected into triage prompts so the
+        LLM can select from ALL available prompts dynamically.
+
+        Returns:
+            Formatted string listing all prompts by category.
+        """
+        prompts_by_category = self.prompt_library.list_prompts_by_category()
+
+        lines = []
+        for category in sorted(prompts_by_category.keys()):
+            # Skip meta prompts (triage prompts themselves)
+            if category == "meta":
+                continue
+
+            prompts = prompts_by_category[category]
+            # Capitalize category name for display
+            category_display = category.replace("_", " ").title()
+            lines.append(f"\n**{category_display}:**")
+
+            for prompt in sorted(prompts, key=lambda p: p.id):
+                goal = prompt.goal or "No description"
+                # Truncate long goals
+                if len(goal) > 100:
+                    goal = goal[:97] + "..."
+                lines.append(f"- `{prompt.id}`: {goal}")
+
+        return "\n".join(lines)
+
     def run_triage(
         self,
         prd_content: str,
@@ -421,10 +455,14 @@ class TriageEngine:
                 error="Triage prompt (meta_triage) not found in prompt library",
             )
 
+        # Build dynamic prompt index from ALL available prompts
+        available_prompts = self.build_prompt_index()
+
         rendered_prompt = triage_prompt.render(
             prd=prd_content,
             code_context=code_context,
             history=history.format_for_prompt(),
+            available_prompts=available_prompts,
         )
 
         analysis_result = self.analysis_engine.analyze(rendered_prompt)
@@ -1275,6 +1313,25 @@ class Orchestrator:
             prompt_library=self.prompt_library,
         )
 
+        # Initialize Ollama for local triage (if available)
+        # Uses local LLM to analyze full codebase for free, then sends
+        # only relevant files to Perplexity for detailed analysis
+        self.ollama_engine: Optional[OllamaEngine] = None
+        if not config.mock_mode:
+            ollama_status = check_ollama_status()
+            if ollama_status["running"] and ollama_status["recommended_model"]:
+                self.ollama_engine = OllamaEngine(
+                    model=ollama_status["recommended_model"],
+                )
+                logger.info(
+                    f"Ollama available for local triage (model: {ollama_status['recommended_model']})"
+                )
+            else:
+                logger.debug(
+                    "Ollama not available - will use Perplexity for triage. "
+                    "Install Ollama for lower API costs: https://ollama.com"
+                )
+
         self.implementation_executor = ImplementationExecutor(
             config=self.config,
             claude_runner=self.claude_runner,
@@ -1427,6 +1484,173 @@ class Orchestrator:
         return RefinementResult(
             success=stages_failed == 0 and stages_completed > 0,
             profile_name=profile.name,
+            stages_completed=stages_completed,
+            stages_failed=stages_failed,
+            plan_path=plan_path,
+            stage_results=stage_results,
+            partial_success=stages_failed > 0 and stages_completed > 0,
+            implementation_report=implementation_report,
+        )
+
+    def refine_with_ollama_triage(self) -> RefinementResult:
+        """Run refinement with Ollama-based intelligent triage.
+
+        This mode uses Ollama (local LLM) to analyze the full codebase for FREE,
+        then sends only relevant files to Perplexity for detailed analysis.
+
+        Flow:
+        1. Pack full codebase with Repomix
+        2. Ollama reads full codebase + PRD + all prompts (local, free)
+        3. Ollama selects relevant prompts and files
+        4. Extract only those files from the packed codebase
+        5. Send reduced context to Perplexity for each selected prompt
+
+        Returns:
+            RefinementResult with the outcome.
+        """
+        if not self.ollama_engine:
+            return RefinementResult(
+                success=False,
+                profile_name="ollama_triage",
+                stages_completed=0,
+                stages_failed=0,
+                error="Ollama not available. Install from https://ollama.com and run: ollama pull llama3.2:3b",
+            )
+
+        logger.info("Starting refinement with Ollama-based triage")
+        logger.info(f"Target repo: {self.config.repo_path}")
+        logger.info(f"Ollama model: {self.ollama_engine.model}")
+
+        # Load PRD
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return RefinementResult(
+                success=False,
+                profile_name="ollama_triage",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Pack full codebase (no filtering - Ollama will handle it)
+        logger.info("Packing full codebase for Ollama analysis...")
+        full_code_context = self._pack_codebase()
+
+        if not full_code_context:
+            return RefinementResult(
+                success=False,
+                profile_name="ollama_triage",
+                stages_completed=0,
+                stages_failed=0,
+                error="Failed to pack codebase",
+            )
+
+        # Build prompt index for Ollama
+        prompt_index = self.triage_engine.build_prompt_index()
+
+        # Run Ollama triage (FREE - local processing)
+        logger.info("Running Ollama triage (local, free)...")
+        triage_result = self.ollama_engine.triage(
+            prd_content=prd_content,
+            code_context=full_code_context,
+            prompt_index=prompt_index,
+        )
+
+        if not triage_result.success:
+            logger.error(f"Ollama triage failed: {triage_result.error}")
+            return RefinementResult(
+                success=False,
+                profile_name="ollama_triage",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"Ollama triage failed: {triage_result.error}",
+            )
+
+        logger.info(f"Ollama assessment: {triage_result.assessment}")
+        logger.info(f"Ollama selected {len(triage_result.selected_prompts)} prompts")
+
+        if not triage_result.selected_prompts:
+            logger.info("Ollama indicates codebase is complete - no analysis needed")
+            return RefinementResult(
+                success=True,
+                profile_name="ollama_triage",
+                stages_completed=0,
+                stages_failed=0,
+            )
+
+        # Extract only relevant files for each prompt and run analysis
+        history = RunHistory()
+        stage_results = []
+        stages_completed = 0
+        stages_failed = 0
+
+        for prompt_selection in triage_result.selected_prompts:
+            prompt_id = prompt_selection.get("prompt_id", "")
+            relevant_files = prompt_selection.get("relevant_files", [])
+            reasoning = prompt_selection.get("reasoning", "")
+
+            logger.info(f"Running prompt: {prompt_id}")
+            logger.info(f"  Relevant files: {relevant_files}")
+            logger.info(f"  Reasoning: {reasoning}")
+
+            # Get the prompt
+            prompt = self.prompt_library.get_prompt(prompt_id)
+            if not prompt:
+                logger.warning(f"Prompt not found: {prompt_id}")
+                stages_failed += 1
+                continue
+
+            # Extract only relevant files from the full codebase
+            if relevant_files:
+                reduced_context = extract_files(full_code_context, relevant_files)
+                tokens_saved = estimate_tokens(full_code_context) - estimate_tokens(reduced_context)
+                logger.info(
+                    f"  Reduced context: {format_token_count(estimate_tokens(reduced_context))} "
+                    f"(saved {format_token_count(tokens_saved)} tokens)"
+                )
+            else:
+                # If no specific files, use full context
+                reduced_context = full_code_context
+
+            # Run the analysis with reduced context (PAID - but much smaller)
+            stage_result, success = self.stage_runner.run_stage(
+                prompt=prompt,
+                prd_content=prd_content,
+                code_context=reduced_context,
+                history=history,
+            )
+
+            if success:
+                stages_completed += 1
+                stage_results.append(stage_result)
+            else:
+                stages_failed += 1
+
+        # Write plan
+        plan_path = None
+        if stage_results:
+            logger.info("Writing improvement plan...")
+            plan_path = self.plan_writer.write_plan(
+                prd_content=prd_content,
+                profile_name="Ollama Intelligent Triage",
+                stage_results=stage_results,
+            )
+            logger.info(f"Plan written to: {plan_path}")
+
+        # Generate implementation report
+        implementation_report = None
+        if stage_results:
+            implementation_report = self.implementation_executor.analyze_and_report(
+                stage_results
+            )
+            logger.info(
+                f"Generated implementation report with "
+                f"{len(implementation_report.tasks)} tasks"
+            )
+
+        return RefinementResult(
+            success=stages_failed == 0 and stages_completed > 0,
+            profile_name="ollama_triage",
             stages_completed=stages_completed,
             stages_failed=stages_failed,
             plan_path=plan_path,

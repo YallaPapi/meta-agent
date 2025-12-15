@@ -104,8 +104,8 @@ def main(
 
 @app.command()
 def refine(
-    profile: str = typer.Option(
-        ...,
+    profile: Optional[str] = typer.Option(
+        None,
         "--profile",
         "-p",
         help="Profile to use for refinement (e.g., 'automation_agent', 'quick_review').",
@@ -137,6 +137,13 @@ def refine(
         False,
         "--dry-run",
         help="Preview prompts and token estimates without making API calls.",
+    ),
+    smart: bool = typer.Option(
+        False,
+        "--smart",
+        "-s",
+        help="Use Ollama for intelligent triage (requires Ollama installed). "
+             "Analyzes full codebase locally for FREE, sends only relevant files to Perplexity.",
     ),
     auto_implement: bool = typer.Option(
         False,
@@ -207,6 +214,12 @@ def refine(
             console.print(f"  - {error}")
         raise typer.Exit(1)
 
+    # Validate that either --profile or --smart is specified
+    if not smart and not profile:
+        console.print("[red]Error:[/red] Either --profile or --smart is required.")
+        console.print("[dim]Use --profile for predefined analysis stages, or --smart for intelligent Ollama-based triage.[/dim]")
+        raise typer.Exit(1)
+
     # Load and validate prompt library
     try:
         prompt_library = PromptLibrary(
@@ -216,7 +229,8 @@ def refine(
         )
         prompt_library.load()
 
-        if not prompt_library.get_profile(profile):
+        # Only validate profile if not using smart mode
+        if not smart and not prompt_library.get_profile(profile):
             available = [p.name for p in prompt_library.list_profiles()]
             console.print(f"[red]Error:[/red] Profile '{profile}' not found.")
             if available:
@@ -233,21 +247,30 @@ def refine(
         console.print("\n[bold yellow]*** DRY RUN: No external API calls will be made. ***[/bold yellow]")
         console.print("[dim]This is a preview of planned analysis steps.[/dim]\n")
 
+    mode_label = "Smart (Ollama)" if smart else profile
     console.print(f"[bold]{'[DRY-RUN] ' if dry_run else ''}Starting refinement[/bold]")
-    console.print(f"[dim]Profile:[/dim] {profile}")
+    console.print(f"[dim]Mode:[/dim] {mode_label}")
     console.print(f"[dim]Target repo:[/dim] {repo_path}")
     console.print(f"[dim]Config dir:[/dim] {cfg_dir}")
     console.print(f"[dim]PRD:[/dim] {config.prd_path}")
     if not dry_run:
         console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}")
+    if smart:
+        console.print("[dim]Ollama:[/dim] Will analyze full codebase locally (free), send only relevant files to Perplexity")
     console.print()
 
     # Run refinement (or dry-run preview)
     orchestrator = Orchestrator(config, prompt_library=prompt_library)
 
     if dry_run:
+        if smart:
+            console.print("[yellow]Note: Dry-run not supported for smart mode yet.[/yellow]")
+            raise typer.Exit(0)
         result = orchestrator.refine_dry_run(profile)
         _display_dry_run_results(result)
+    elif smart:
+        result = orchestrator.refine_with_ollama_triage()
+        _display_refinement_results(result)
     else:
         result = orchestrator.refine(profile)
         _display_refinement_results(result)
