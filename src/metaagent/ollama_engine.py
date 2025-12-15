@@ -164,6 +164,7 @@ class OllamaEngine:
         prd_content: str,
         code_context: str,
         prompt_index: str,
+        focus: Optional[str] = None,
     ) -> TriageOutput:
         """Run triage to select prompts and relevant files.
 
@@ -171,12 +172,14 @@ class OllamaEngine:
             prd_content: The PRD content.
             code_context: The full packed codebase from Repomix.
             prompt_index: Formatted list of available prompts.
+            focus: Optional custom focus to steer prompt selection
+                (e.g., "electron frontend with gamified UX").
 
         Returns:
             TriageOutput with selected prompts and files.
         """
         triage_prompt = self._build_triage_prompt(
-            prd_content, code_context, prompt_index
+            prd_content, code_context, prompt_index, focus
         )
 
         result = self.generate(triage_prompt)
@@ -191,9 +194,25 @@ class OllamaEngine:
         prd_content: str,
         code_context: str,
         prompt_index: str,
+        focus: Optional[str] = None,
     ) -> str:
         """Build the triage prompt for Ollama."""
+        focus_section = ""
+        if focus:
+            focus_section = f"""
+## Focus Area
+
+When selecting prompts and analyzing the codebase, prioritize improvements related to:
+
+**{focus}**
+
+Select prompts that will help achieve this vision. Focus on files and code areas
+that are most relevant to this goal.
+
+"""
+
         return f"""# Codebase Analysis and Triage
+{focus_section}
 
 You are a senior software architect. Analyze this codebase against its PRD and determine:
 1. Which analysis prompts are most relevant for improving this codebase

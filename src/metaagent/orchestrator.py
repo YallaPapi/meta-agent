@@ -1492,7 +1492,9 @@ class Orchestrator:
             implementation_report=implementation_report,
         )
 
-    def refine_with_ollama_triage(self) -> RefinementResult:
+    def refine_with_ollama_triage(
+        self, focus: Optional[str] = None
+    ) -> RefinementResult:
         """Run refinement with Ollama-based intelligent triage.
 
         This mode uses Ollama (local LLM) to analyze the full codebase for FREE,
@@ -1504,6 +1506,10 @@ class Orchestrator:
         3. Ollama selects relevant prompts and files
         4. Extract only those files from the packed codebase
         5. Send reduced context to Perplexity for each selected prompt
+
+        Args:
+            focus: Optional custom focus for the analysis (e.g., "electron frontend
+                with gamified UX"). Steers prompt selection toward specific goals.
 
         Returns:
             RefinementResult with the outcome.
@@ -1520,6 +1526,8 @@ class Orchestrator:
         logger.info("Starting refinement with Ollama-based triage")
         logger.info(f"Target repo: {self.config.repo_path}")
         logger.info(f"Ollama model: {self.ollama_engine.model}")
+        if focus:
+            logger.info(f"Focus: {focus}")
 
         # Load PRD
         prd_content = self._load_prd()
@@ -1554,6 +1562,7 @@ class Orchestrator:
             prd_content=prd_content,
             code_context=full_code_context,
             prompt_index=prompt_index,
+            focus=focus,
         )
 
         if not triage_result.success:

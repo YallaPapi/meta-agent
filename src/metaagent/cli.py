@@ -145,6 +145,13 @@ def refine(
         help="Use Ollama for intelligent triage (requires Ollama installed). "
              "Analyzes full codebase locally for FREE, sends only relevant files to Perplexity.",
     ),
+    focus: Optional[str] = typer.Option(
+        None,
+        "--focus",
+        "-f",
+        help="Custom focus for analysis (used with --smart). "
+             "E.g., 'electron frontend with gamified UX' or 'API performance and security'.",
+    ),
     auto_implement: bool = typer.Option(
         False,
         "--auto-implement",
@@ -257,6 +264,8 @@ def refine(
         console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}")
     if smart:
         console.print("[dim]Ollama:[/dim] Will analyze full codebase locally (free), send only relevant files to Perplexity")
+        if focus:
+            console.print(f"[dim]Focus:[/dim] {focus}")
     console.print()
 
     # Run refinement (or dry-run preview)
@@ -269,7 +278,7 @@ def refine(
         result = orchestrator.refine_dry_run(profile)
         _display_dry_run_results(result)
     elif smart:
-        result = orchestrator.refine_with_ollama_triage()
+        result = orchestrator.refine_with_ollama_triage(focus=focus)
         _display_refinement_results(result)
     else:
         result = orchestrator.refine(profile)
