@@ -217,30 +217,32 @@ Select the prompts that would be most valuable based on issues you find:
 
 1. Compare the codebase against the PRD
 2. Identify the most pressing issues or gaps
-3. Select 2-5 analysis prompts that would help address these issues
-4. For each prompt, list the specific files that are relevant
+3. Select 2-5 analysis prompts from the list above that would help address these issues
+4. For each prompt, list the ACTUAL files from the codebase that are relevant
+
+IMPORTANT:
+- Use REAL prompt IDs from the "Available Analysis Prompts" list above (e.g., "quality_error_analysis", "security_vulnerability_analysis")
+- Use REAL file paths from the codebase (e.g., "spoof_videos.py", "create_va_chunks.py")
+- Do NOT use placeholder values like "path/to/file1.py"
 
 ## Output Format
 
-You MUST respond with valid JSON only, no other text:
+Respond with valid JSON only:
 
 ```json
 {{
-  "assessment": "Brief 2-3 sentence assessment of codebase state",
+  "assessment": "Your actual assessment of this specific codebase",
   "selected_prompts": [
     {{
-      "prompt_id": "exact_prompt_id_from_list",
-      "reasoning": "Why this prompt is needed",
-      "relevant_files": [
-        "path/to/file1.py",
-        "path/to/file2.py"
-      ]
+      "prompt_id": "actual_prompt_id_from_list_above",
+      "reasoning": "Your actual reasoning for this codebase",
+      "relevant_files": ["actual_file.py", "another_real_file.py"]
     }}
   ]
 }}
 ```
 
-Respond with JSON only:"""
+JSON response:"""
 
     def _parse_triage_output(self, content: str) -> TriageOutput:
         """Parse the triage response from Ollama."""

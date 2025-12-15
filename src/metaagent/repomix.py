@@ -63,10 +63,19 @@ class RepomixRunner:
                 # Note: No default ignores - we pack the full codebase.
                 # Ollama handles the full context locally (free, no token limits),
                 # then sends only relevant findings to Perplexity.
-                cmd_options = [
-                    ["repomix", "--output", str(output_path), "--style", "markdown"],
-                    ["npx", "repomix", "--output", str(output_path), "--style", "markdown"],
-                ]
+                #
+                # On Windows, we need to find the actual executable path because
+                # subprocess.run() with shell=False can't find .cmd files by name
+                import shutil
+
+                repomix_path = shutil.which("repomix")
+                npx_path = shutil.which("npx")
+
+                cmd_options = []
+                if repomix_path:
+                    cmd_options.append([repomix_path, "--output", str(output_path), "--style", "markdown"])
+                if npx_path:
+                    cmd_options.append([npx_path, "repomix", "--output", str(output_path), "--style", "markdown"])
 
                 result = None
                 last_error = None
@@ -78,6 +87,8 @@ class RepomixRunner:
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
+                            encoding="utf-8",  # Explicit UTF-8 for Windows compatibility
+                            errors="replace",  # Replace undecodable chars instead of crashing
                             timeout=self.timeout,
                             shell=False,  # Explicit shell=False for security
                         )
