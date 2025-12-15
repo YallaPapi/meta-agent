@@ -227,6 +227,7 @@ class StageRunner:
         prd_content: str,
         code_context: str,
         history: RunHistory,
+        focus: Optional[str] = None,
     ) -> tuple[StageResult, bool]:
         """Execute a single analysis stage.
 
@@ -235,6 +236,8 @@ class StageRunner:
             prd_content: The PRD content.
             code_context: The packed codebase.
             history: Previous analysis history.
+            focus: Optional development focus to steer the analysis
+                (e.g., "add analytics tracking for videos processed").
 
         Returns:
             Tuple of (StageResult, success_bool).
@@ -248,6 +251,24 @@ class StageRunner:
             history=history.format_for_prompt(),
             current_stage=prompt.id,
         )
+
+        # Inject development focus if provided
+        if focus:
+            focus_instruction = f"""
+## Development Focus
+
+In addition to the standard analysis, prioritize recommendations and tasks
+that help achieve the following development goal:
+
+**{focus}**
+
+When generating tasks, include specific implementation steps for this feature
+while considering how it integrates with the existing codebase.
+
+---
+
+"""
+            rendered_prompt = focus_instruction + rendered_prompt
 
         # Run analysis
         analysis_result = self.analysis_engine.analyze(rendered_prompt)
@@ -1622,11 +1643,13 @@ class Orchestrator:
                 reduced_context = full_code_context
 
             # Run the analysis with reduced context (PAID - but much smaller)
+            # Pass focus to Perplexity so it can do the heavy thinking
             stage_result, success = self.stage_runner.run_stage(
                 prompt=prompt,
                 prd_content=prd_content,
                 code_context=reduced_context,
                 history=history,
+                focus=focus,
             )
 
             if success:
@@ -1667,6 +1690,286 @@ class Orchestrator:
             partial_success=stages_failed > 0 and stages_completed > 0,
             implementation_report=implementation_report,
         )
+
+    def refine_with_feature_focus(self, feature_request: str) -> RefinementResult:
+        """Run feature-focused refinement with intelligent prompt selection and rewriting.
+
+        This mode combines Ollama (for file selection) with Perplexity (for heavy lifting):
+
+        Flow:
+        1. Pack full codebase with Repomix
+        2. Ollama reads codebase + feature request, returns relevant FILES only (lightweight)
+        3. Extract those files from the packed codebase
+        4. Perplexity receives:
+           - Relevant code (reduced context)
+           - Feature request
+           - List of ALL codebase-digest prompts
+        5. Perplexity:
+           - Selects which prompts are relevant for this feature
+           - REWRITES those prompts to be specific to the feature
+           - Generates implementation tasks
+
+        This gives Perplexity the full context to do intelligent prompt selection
+        and customization, while Ollama handles cheap file filtering.
+
+        Args:
+            feature_request: The feature to implement or bug to fix
+                (e.g., "add analytics: track videos processed, captions, API calls").
+
+        Returns:
+            RefinementResult with the outcome.
+        """
+        if not self.ollama_engine:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error="Ollama not available. Install from https://ollama.com and run: ollama pull llama3.2:3b",
+            )
+
+        logger.info("Starting feature-focused refinement")
+        logger.info(f"Target repo: {self.config.repo_path}")
+        logger.info(f"Feature request: {feature_request}")
+
+        # Load PRD
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Pack full codebase
+        logger.info("Packing full codebase...")
+        full_code_context = self._pack_codebase()
+
+        if not full_code_context:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error="Failed to pack codebase",
+            )
+
+        # Step 1: Ollama does lightweight file selection (dedicated method)
+        logger.info("Step 1: Ollama selecting relevant files (local, free)...")
+        relevant_files = self.ollama_engine.select_files(
+            feature_request=feature_request,
+            code_context=full_code_context,
+            prd_content=prd_content,
+        )
+
+        if relevant_files:
+            logger.info(f"Ollama selected {len(relevant_files)} relevant files: {relevant_files}")
+        else:
+            logger.info("Ollama returned no files, using full codebase context")
+
+        # Step 2: Extract only relevant files (or use full context if no files selected)
+        if relevant_files:
+            reduced_context = extract_files(full_code_context, relevant_files)
+            tokens_full = estimate_tokens(full_code_context)
+            tokens_reduced = estimate_tokens(reduced_context)
+            logger.info(
+                f"Reduced context: {format_token_count(tokens_reduced)} "
+                f"(saved {format_token_count(tokens_full - tokens_reduced)} tokens)"
+            )
+        else:
+            reduced_context = full_code_context
+            logger.info("Using full codebase context")
+
+        # Step 3: Build prompt index for Perplexity (all available prompts)
+        prompt_index = self.triage_engine.build_prompt_index()
+
+        # Step 4: Get the feature expansion prompt
+        feature_prompt = self.prompt_library.get_prompt("meta_feature_expansion")
+        if not feature_prompt:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error="Feature expansion prompt (meta_feature_expansion) not found",
+            )
+
+        # Step 5: Send to Perplexity for heavy lifting
+        logger.info("Step 2: Perplexity analyzing feature and customizing prompts...")
+        rendered_prompt = feature_prompt.render(
+            feature_request=feature_request,
+            code_context=reduced_context,
+            prd=prd_content,
+            available_prompts=prompt_index,
+        )
+
+        # Use analyze_raw to avoid schema validation (feature expansion has its own schema)
+        analysis_result = self.analysis_engine.analyze_raw(
+            rendered_prompt,
+            system_message=(
+                "You are a senior software architect. Analyze the codebase and feature request. "
+                "Respond with valid JSON following the exact schema specified in the prompt."
+            ),
+        )
+
+        if not analysis_result.success:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"Perplexity analysis failed: {analysis_result.error}",
+            )
+
+        # Step 6: Parse and process the response
+        logger.info("Processing Perplexity response...")
+        feature_result = self._parse_feature_response(analysis_result)
+
+        if not feature_result:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus",
+                stages_completed=0,
+                stages_failed=0,
+                error="Failed to parse feature expansion response",
+            )
+
+        # Build stage results from the customized prompts and tasks
+        stage_results = []
+
+        # Create a stage result for the feature analysis
+        stage_result = StageResult(
+            stage_id="feature_expansion",
+            stage_name=f"Feature: {feature_result.get('feature_analysis', {}).get('core_functionality', feature_request)[:50]}",
+            summary=self._format_feature_summary(feature_result),
+            recommendations=self._extract_recommendations(feature_result),
+            tasks=feature_result.get("implementation_tasks", []),
+        )
+        stage_results.append(stage_result)
+
+        # Log the customized prompts
+        selected_prompts = feature_result.get("selected_prompts", [])
+        logger.info(f"Perplexity selected and customized {len(selected_prompts)} prompts:")
+        for sp in selected_prompts:
+            logger.info(f"  - {sp.get('original_prompt_id')}: {sp.get('rationale', '')[:80]}")
+
+        # Write plan
+        plan_path = None
+        if stage_results:
+            logger.info("Writing improvement plan...")
+            plan_path = self.plan_writer.write_plan(
+                prd_content=prd_content,
+                profile_name=f"Feature Focus: {feature_request[:50]}",
+                stage_results=stage_results,
+            )
+            logger.info(f"Plan written to: {plan_path}")
+
+        # Generate implementation report
+        implementation_report = self.implementation_executor.analyze_and_report(stage_results)
+        logger.info(f"Generated {len(implementation_report.tasks)} implementation tasks")
+
+        return RefinementResult(
+            success=True,
+            profile_name="feature_focus",
+            stages_completed=1,
+            stages_failed=0,
+            plan_path=plan_path,
+            stage_results=stage_results,
+            implementation_report=implementation_report,
+        )
+
+    def _parse_feature_response(self, analysis_result: AnalysisResult) -> Optional[dict]:
+        """Parse the feature expansion response from Perplexity.
+
+        Args:
+            analysis_result: Raw analysis result from Perplexity.
+
+        Returns:
+            Parsed feature response dict or None if parsing fails.
+        """
+        response_text = analysis_result.raw_response or analysis_result.summary
+
+        if not response_text:
+            logger.error("Empty feature expansion response")
+            return None
+
+        # Log first part of response for debugging
+        logger.debug(f"Feature response (first 500 chars): {response_text[:500]}")
+
+        # Use shared JSON extraction
+        data, error = extract_json_from_response(response_text)
+
+        if data is None:
+            logger.error(f"Failed to parse feature response: {error}")
+            logger.debug(f"Full response: {response_text[:2000]}")
+            return None
+
+        logger.debug(f"Parsed feature data keys: {list(data.keys())}")
+        return data
+
+    def _format_feature_summary(self, feature_result: dict) -> str:
+        """Format feature analysis into a summary string.
+
+        Args:
+            feature_result: Parsed feature response dict.
+
+        Returns:
+            Formatted summary string.
+        """
+        analysis = feature_result.get("feature_analysis", {})
+        lines = []
+
+        if analysis.get("core_functionality"):
+            lines.append(f"**Core Functionality:** {analysis['core_functionality']}")
+
+        additions = analysis.get("suggested_additions", [])
+        if additions:
+            lines.append(f"\n**Suggested Additions:** {len(additions)} additional features recommended")
+            for add in additions[:5]:  # Show first 5
+                lines.append(f"  - {add}")
+            if len(additions) > 5:
+                lines.append(f"  - ... and {len(additions) - 5} more")
+
+        files = analysis.get("affected_files", [])
+        if files:
+            lines.append(f"\n**Affected Files:** {', '.join(files)}")
+
+        if analysis.get("architectural_notes"):
+            lines.append(f"\n**Architecture Notes:** {analysis['architectural_notes']}")
+
+        # Add customized prompts section
+        prompts = feature_result.get("selected_prompts", [])
+        if prompts:
+            lines.append(f"\n**Customized Analysis Prompts:** {len(prompts)} prompts tailored to this feature")
+            for p in prompts:
+                lines.append(f"  - {p.get('original_prompt_id')}: {p.get('rationale', '')[:60]}...")
+
+        return "\n".join(lines)
+
+    def _extract_recommendations(self, feature_result: dict) -> list[str]:
+        """Extract recommendations from feature response.
+
+        Args:
+            feature_result: Parsed feature response dict.
+
+        Returns:
+            List of recommendation strings.
+        """
+        recommendations = []
+
+        # Add suggested additions as recommendations
+        analysis = feature_result.get("feature_analysis", {})
+        for addition in analysis.get("suggested_additions", []):
+            recommendations.append(f"Consider adding: {addition}")
+
+        # Add customized prompt summaries
+        for prompt in feature_result.get("selected_prompts", []):
+            if prompt.get("rationale"):
+                recommendations.append(f"Analysis focus: {prompt['rationale']}")
+
+        return recommendations
 
     def refine_dry_run(self, profile_id: str) -> RefinementResult:
         """Preview the refinement pipeline without making API calls.

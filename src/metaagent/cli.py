@@ -266,6 +266,7 @@ def refine(
         console.print("[dim]Ollama:[/dim] Will analyze full codebase locally (free), send only relevant files to Perplexity")
         if focus:
             console.print(f"[dim]Focus:[/dim] {focus}")
+            console.print("[dim]Mode:[/dim] Feature-focused (Perplexity selects and rewrites prompts)")
     console.print()
 
     # Run refinement (or dry-run preview)
@@ -277,7 +278,13 @@ def refine(
             raise typer.Exit(0)
         result = orchestrator.refine_dry_run(profile)
         _display_dry_run_results(result)
+    elif smart and focus:
+        # Feature-focused mode: Ollama does file selection, Perplexity does heavy lifting
+        # (selects and rewrites codebase-digest prompts for this specific feature)
+        result = orchestrator.refine_with_feature_focus(feature_request=focus)
+        _display_refinement_results(result)
     elif smart:
+        # Smart mode without focus: standard Ollama triage
         result = orchestrator.refine_with_ollama_triage(focus=focus)
         _display_refinement_results(result)
     else:

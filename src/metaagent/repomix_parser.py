@@ -27,6 +27,8 @@ def parse_repomix_files(repomix_content: str) -> dict[str, ExtractedFile]:
     file contents here
     ```
 
+    Note: Repomix uses 4 backticks (````) when content contains 3-backtick code blocks.
+
     Args:
         repomix_content: The full Repomix markdown output.
 
@@ -37,18 +39,20 @@ def parse_repomix_files(repomix_content: str) -> dict[str, ExtractedFile]:
 
     # Pattern to match file sections
     # Handles both "## File: path" and "### File: path" formats
+    # Supports both 3 and 4 backtick code blocks (Repomix uses 4 when content has 3)
     file_pattern = re.compile(
-        r"#{2,3}\s+(?:File:\s*)?([^\n]+?)\s*\n+"  # File header
-        r"```(\w*)\n"  # Code block start with optional language
+        r"#{2,3}\s+File:\s*([^\n]+?)\s*\n+"  # File header (require "File:" prefix)
+        r"(`{3,4})(\w*)\n"  # Code block start with 3 or 4 backticks + optional language
         r"(.*?)"  # File content (non-greedy)
-        r"\n```",  # Code block end
+        r"\n\2",  # Code block end (match same number of backticks)
         re.DOTALL,
     )
 
     for match in file_pattern.finditer(repomix_content):
         file_path = match.group(1).strip()
-        language = match.group(2) or None
-        content = match.group(3)
+        # group 2 is the backticks
+        language = match.group(3) or None
+        content = match.group(4)
 
         # Clean up the file path (remove any markdown formatting)
         file_path = file_path.strip("`").strip()

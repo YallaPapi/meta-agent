@@ -176,6 +176,25 @@ class AnalysisEngine(ABC):
         """
         pass
 
+    def analyze_raw(
+        self,
+        prompt: str,
+        system_message: str = "You are a senior software architect. Follow the instructions exactly and respond with valid JSON only.",
+    ) -> AnalysisResult:
+        """Run analysis and return raw response without schema validation.
+
+        Default implementation calls analyze(). Override in subclasses for
+        custom behavior.
+
+        Args:
+            prompt: The rendered prompt to send.
+            system_message: Custom system message (may be ignored by some engines).
+
+        Returns:
+            AnalysisResult with raw_response populated.
+        """
+        return self.analyze(prompt)
+
 
 class MockAnalysisEngine(AnalysisEngine):
     """Mock analysis engine for testing without API calls."""
@@ -370,6 +389,80 @@ class PerplexityAnalysisEngine(AnalysisEngine):
         capped_backoff = min(exp_backoff, self.retry_backoff_max)
         # Add jitter: random value between 0 and capped_backoff
         return random.uniform(0, capped_backoff)
+
+    def analyze_raw(
+        self,
+        prompt: str,
+        system_message: str = "You are a senior software architect. Follow the instructions exactly and respond with valid JSON only.",
+    ) -> AnalysisResult:
+        """Run analysis and return raw response without schema validation.
+
+        Use this for custom prompts that have their own JSON schema different
+        from the standard summary/recommendations/tasks format.
+
+        Args:
+            prompt: The rendered prompt to send.
+            system_message: Custom system message for the LLM.
+
+        Returns:
+            AnalysisResult with raw_response populated.
+        """
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, self.retry_max_attempts + 1):
+            try:
+                response = self.client.post(
+                    self.API_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                return AnalysisResult(
+                    summary="",
+                    success=True,
+                    raw_response=content,
+                )
+
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError,
+                    httpx.RemoteProtocolError) as e:
+                last_error = e
+
+                if self._should_retry(e, attempt):
+                    backoff = self._get_backoff_time(attempt)
+                    logger.warning(
+                        f"Transient error on attempt {attempt}/{self.retry_max_attempts}. "
+                        f"Retrying in {backoff:.2f}s..."
+                    )
+                    time.sleep(backoff)
+                    continue
+                break
+
+            except Exception as e:
+                return AnalysisResult(
+                    summary="",
+                    success=False,
+                    error=f"Unexpected error: {type(e).__name__}",
+                )
+
+        # All retries exhausted
+        return AnalysisResult(
+            summary="",
+            success=False,
+            error=f"Max retries exceeded: {type(last_error).__name__ if last_error else 'Unknown'}",
+        )
 
     def analyze(self, prompt: str) -> AnalysisResult:
         """Run analysis using Perplexity API with retry logic.

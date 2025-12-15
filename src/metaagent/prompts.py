@@ -90,6 +90,7 @@ class Prompt:
         code_context: str = "",
         history: str = "",
         current_stage: str = "",
+        **kwargs,
     ) -> str:
         """Render the prompt template with variables.
 
@@ -108,6 +109,8 @@ class Prompt:
             code_context: The packed codebase content.
             history: Previous analysis summaries.
             current_stage: Current stage name.
+            **kwargs: Additional variables for template rendering
+                (e.g., feature_request, available_prompts).
 
         Returns:
             Rendered prompt string.
@@ -119,10 +122,10 @@ class Prompt:
 
         # YAML prompts use Jinja2 template interpolation
         if self.source == 'yaml':
-            return self._render_yaml_prompt(prd, code_context, history, current_stage)
+            return self._render_yaml_prompt(prd, code_context, history, current_stage, **kwargs)
 
         # Markdown prompts use structured context prepending
-        return self._render_markdown_prompt(prd, code_context, history, current_stage)
+        return self._render_markdown_prompt(prd, code_context, history, current_stage, **kwargs)
 
     def _render_yaml_prompt(
         self,
@@ -130,6 +133,7 @@ class Prompt:
         code_context: str = "",
         history: str = "",
         current_stage: str = "",
+        **kwargs,
     ) -> str:
         """Render a YAML prompt using Jinja2 interpolation.
 
@@ -138,6 +142,7 @@ class Prompt:
             code_context: The packed codebase content.
             history: Previous analysis summaries.
             current_stage: Current stage name.
+            **kwargs: Additional variables for template rendering.
 
         Returns:
             Rendered prompt string with variables interpolated.
@@ -149,6 +154,7 @@ class Prompt:
                 code_context=code_context,
                 history=history,
                 current_stage=current_stage,
+                **kwargs,
             )
         except UndefinedError as e:
             logger.warning(f"Jinja2 template error in prompt '{self.id}': {e}")
@@ -161,6 +167,7 @@ class Prompt:
         code_context: str = "",
         history: str = "",
         current_stage: str = "",
+        **kwargs,
     ) -> str:
         """Render a markdown prompt by prepending context sections.
 
@@ -169,6 +176,7 @@ class Prompt:
             code_context: The packed codebase content.
             history: Previous analysis summaries.
             current_stage: Current stage name.
+            **kwargs: Additional variables for template rendering.
 
         Returns:
             Rendered prompt string with context prepended.
@@ -184,8 +192,20 @@ class Prompt:
 
         context_block = "\n\n---\n\n".join(context_sections) if context_sections else ""
 
-        # 2. The analysis prompt/instructions
-        prompt_block = self.template
+        # 2. The analysis prompt/instructions - apply Jinja2 templating
+        # This allows markdown prompts to use variables like {{ feature_request }}
+        try:
+            template = Template(self.template)
+            prompt_block = template.render(
+                prd=prd,
+                code_context=code_context,
+                history=history,
+                current_stage=current_stage,
+                **kwargs,
+            )
+        except UndefinedError as e:
+            logger.warning(f"Jinja2 template error in prompt '{self.id}': {e}")
+            prompt_block = self.template
 
         # 3. Add JSON schema if this prompt doesn't have one
         json_schema = ""
@@ -337,6 +357,7 @@ class PromptLibrary:
             has_json_schema = bool(
                 re.search(r'"summary".*"recommendations".*"tasks"', content, re.DOTALL)
                 or re.search(r'"assessment".*"selected_prompts".*"done"', content, re.DOTALL)
+                or re.search(r'"feature_analysis".*"selected_prompts".*"implementation_tasks"', content, re.DOTALL)
             )
 
             logger.debug(

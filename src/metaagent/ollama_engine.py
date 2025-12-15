@@ -159,6 +159,71 @@ class OllamaEngine:
                 error=f"Ollama request failed: {e}",
             )
 
+    def select_files(
+        self,
+        feature_request: str,
+        code_context: str,
+        prd_content: str = "",
+    ) -> list[str]:
+        """Select relevant files for a feature request.
+
+        This is a lightweight operation - just file selection, no prompt selection.
+        Used in feature-focused mode where Perplexity does the heavy lifting.
+
+        Args:
+            feature_request: The feature to implement or bug to fix.
+            code_context: The full packed codebase from Repomix.
+            prd_content: Optional PRD content for context.
+
+        Returns:
+            List of relevant file paths.
+        """
+        prompt = f"""# File Selection for Feature Implementation
+
+You are a software architect. Given a feature request and a codebase,
+identify which files are most relevant to implementing this feature.
+
+## Feature Request
+
+**{feature_request}**
+
+## Codebase
+
+{code_context}
+
+## Your Task
+
+List the files that would need to be modified or referenced to implement this feature.
+Focus on the most relevant 3-8 files.
+
+## Output Format
+
+Respond with a JSON array of file paths ONLY. No other text.
+
+Example: ["file1.py", "file2.py", "config.json"]
+
+JSON array:"""
+
+        result = self.generate(prompt)
+
+        if not result.success:
+            logger.warning(f"Ollama file selection failed: {result.error}")
+            return []
+
+        # Parse the JSON array
+        try:
+            # Look for JSON array in response
+            content = result.content.strip()
+            json_match = re.search(r'\[.*?\]', content, re.DOTALL)
+            if json_match:
+                files = json.loads(json_match.group(0))
+                if isinstance(files, list):
+                    return [f for f in files if isinstance(f, str)]
+            return []
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse file list: {result.content[:200]}")
+            return []
+
     def triage(
         self,
         prd_content: str,
@@ -265,6 +330,154 @@ Remember: Replace everything in [brackets] with real values. Do not copy the bra
 
 JSON response:"""
 
+    def expand_feature(
+        self,
+        feature_request: str,
+        code_context: str,
+        prd_content: str,
+    ) -> FeatureExpansion:
+        """Expand a rough feature request into a detailed specification.
+
+        Takes a user's rough feature idea and analyzes the codebase to produce:
+        - Detailed feature requirements
+        - Suggested additional functionality
+        - Relevant files that need modification
+        - Integration points in the code
+
+        Args:
+            feature_request: User's rough feature description
+                (e.g., "add analytics tracking").
+            code_context: The full packed codebase from Repomix.
+            prd_content: The PRD content for context.
+
+        Returns:
+            FeatureExpansion with detailed spec and implementation guidance.
+        """
+        prompt = self._build_feature_expansion_prompt(
+            feature_request, code_context, prd_content
+        )
+
+        result = self.generate(prompt)
+
+        if not result.success:
+            return FeatureExpansion(success=False, error=result.error)
+
+        return self._parse_feature_expansion(result.content, feature_request)
+
+    def _build_feature_expansion_prompt(
+        self,
+        feature_request: str,
+        code_context: str,
+        prd_content: str,
+    ) -> str:
+        """Build the feature expansion prompt for Ollama."""
+        return f"""# Feature Design and Expansion
+
+You are a senior software architect. A developer has requested a new feature.
+Your job is to analyze the codebase and expand their rough idea into a
+detailed feature specification.
+
+## The Feature Request
+
+**"{feature_request}"**
+
+## Current Product Requirements (PRD)
+
+{prd_content}
+
+## Current Codebase
+
+{code_context}
+
+## Your Task
+
+1. Understand what the developer wants to achieve
+2. Analyze the codebase to understand the current architecture
+3. Expand the feature request into detailed requirements
+4. Identify what ADDITIONAL functionality would be valuable (things they didn't ask for but should have)
+5. Find the specific files and code locations that need modification
+6. Note any integration points or dependencies
+
+## Output Format
+
+Respond with valid JSON:
+
+```json
+{{
+  "feature_name": "[Clear name for this feature]",
+  "description": "[2-3 sentence description of the full feature]",
+  "metrics_to_track": [
+    "[Specific metric 1 the user asked for]",
+    "[Specific metric 2 the user asked for]",
+    "[etc...]"
+  ],
+  "suggested_additions": [
+    "[Additional metric/feature 1 they didn't ask for but should track]",
+    "[Additional metric/feature 2]",
+    "[Additional metric/feature 3]",
+    "[etc... aim for 5-10 suggestions based on the codebase]"
+  ],
+  "relevant_files": [
+    "[file1.py that needs modification]",
+    "[file2.py that needs modification]"
+  ],
+  "integration_points": [
+    {{
+      "file": "[filename.py]",
+      "location": "[function or class name]",
+      "description": "[What needs to happen here]"
+    }}
+  ],
+  "implementation_notes": "[Any important considerations, gotchas, or architectural decisions]"
+}}
+```
+
+Remember:
+- Use REAL file names from the codebase above
+- Be specific about what to track and where
+- Suggest things the developer didn't think of
+
+JSON response:"""
+
+    def _parse_feature_expansion(
+        self, content: str, original_request: str
+    ) -> FeatureExpansion:
+        """Parse the feature expansion response from Ollama."""
+        try:
+            # Look for JSON in code blocks
+            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find raw JSON
+                json_match = re.search(r"\{.*\}", content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    return FeatureExpansion(
+                        success=False,
+                        error=f"No JSON found in response: {content[:500]}",
+                    )
+
+            data = json.loads(json_str)
+
+            return FeatureExpansion(
+                success=True,
+                feature_name=data.get("feature_name", original_request),
+                description=data.get("description", ""),
+                metrics_to_track=data.get("metrics_to_track", []),
+                suggested_additions=data.get("suggested_additions", []),
+                relevant_files=data.get("relevant_files", []),
+                integration_points=data.get("integration_points", []),
+                implementation_notes=data.get("implementation_notes", ""),
+            )
+
+        except json.JSONDecodeError as e:
+            return FeatureExpansion(
+                success=False,
+                error=f"Failed to parse JSON: {e}. Response: {content[:500]}",
+            )
+
     def _parse_triage_output(self, content: str) -> TriageOutput:
         """Parse the triage response from Ollama."""
         # Try to extract JSON from the response
@@ -297,6 +510,21 @@ JSON response:"""
                 success=False,
                 error=f"Failed to parse JSON: {e}. Response: {content[:500]}",
             )
+
+
+@dataclass
+class FeatureExpansion:
+    """Expanded feature specification from Ollama."""
+
+    success: bool
+    feature_name: str = ""
+    description: str = ""
+    metrics_to_track: list[str] = field(default_factory=list)
+    suggested_additions: list[str] = field(default_factory=list)
+    relevant_files: list[str] = field(default_factory=list)
+    integration_points: list[dict] = field(default_factory=list)
+    implementation_notes: str = ""
+    error: Optional[str] = None
 
 
 def check_ollama_status() -> dict:
