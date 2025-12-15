@@ -58,13 +58,10 @@ class RepomixRunner:
             try:
                 # Try repomix directly first (if installed globally)
                 # Fall back to npx repomix if direct call fails
-                # On Windows, use shell=True to properly resolve PATH
-                import platform
-                use_shell = platform.system() == "Windows"
-
+                # Use list-based commands to avoid shell injection vulnerabilities
                 cmd_options = [
-                    "repomix --output {} --style markdown".format(str(output_path)),
-                    "npx repomix --output {} --style markdown".format(str(output_path)),
+                    ["repomix", "--output", str(output_path), "--style", "markdown"],
+                    ["npx", "repomix", "--output", str(output_path), "--style", "markdown"],
                 ]
 
                 result = None
@@ -78,13 +75,13 @@ class RepomixRunner:
                             capture_output=True,
                             text=True,
                             timeout=self.timeout,
-                            shell=use_shell,
+                            shell=False,  # Explicit shell=False for security
                         )
                         if result.returncode == 0:
                             break
                         last_error = result.stderr
                     except FileNotFoundError:
-                        last_error = f"Command not found: {cmd.split()[0]}"
+                        last_error = f"Command not found: {cmd[0]}"
                         continue
 
                 if result is None or result.returncode != 0:

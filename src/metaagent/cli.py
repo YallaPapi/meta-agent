@@ -133,6 +133,11 @@ def refine(
         "-m",
         help="Run in mock mode (no API calls).",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview prompts and token estimates without making API calls.",
+    ),
     auto_implement: bool = typer.Option(
         False,
         "--auto-implement",
@@ -187,6 +192,10 @@ def refine(
     if mock:
         config.mock_mode = True
 
+    if dry_run:
+        config.dry_run = True
+        config.mock_mode = True  # Dry-run implies mock mode
+
     if auto_implement:
         config.auto_implement = True
 
@@ -220,18 +229,83 @@ def refine(
         raise typer.Exit(1)
 
     # Display configuration
-    console.print(f"\n[bold]Starting refinement[/bold]")
+    if dry_run:
+        console.print("\n[bold yellow]*** DRY RUN: No external API calls will be made. ***[/bold yellow]")
+        console.print("[dim]This is a preview of planned analysis steps.[/dim]\n")
+
+    console.print(f"[bold]{'[DRY-RUN] ' if dry_run else ''}Starting refinement[/bold]")
     console.print(f"[dim]Profile:[/dim] {profile}")
     console.print(f"[dim]Target repo:[/dim] {repo_path}")
     console.print(f"[dim]Config dir:[/dim] {cfg_dir}")
     console.print(f"[dim]PRD:[/dim] {config.prd_path}")
-    console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}\n")
+    if not dry_run:
+        console.print(f"[dim]Mock mode:[/dim] {'enabled' if config.mock_mode else 'disabled'}")
+    console.print()
 
-    # Run refinement
+    # Run refinement (or dry-run preview)
     orchestrator = Orchestrator(config, prompt_library=prompt_library)
-    result = orchestrator.refine(profile)
 
-    # Display results
+    if dry_run:
+        result = orchestrator.refine_dry_run(profile)
+        _display_dry_run_results(result)
+    else:
+        result = orchestrator.refine(profile)
+        _display_refinement_results(result)
+
+    if result.error:
+        console.print(f"\n[red]Error:[/red] {result.error}")
+        raise typer.Exit(1)
+
+
+def _display_dry_run_results(result) -> None:
+    """Display dry-run results with planned calls and token estimates.
+
+    Args:
+        result: RefinementResult from dry-run.
+    """
+    from .tokens import format_token_count
+
+    if not result.planned_calls:
+        console.print("[yellow]No stages would be executed for this profile.[/yellow]")
+        return
+
+    console.print(f"\n[bold]Planned Analysis Steps ({len(result.planned_calls)} stages)[/bold]\n")
+
+    total_tokens = 0
+
+    for i, call in enumerate(result.planned_calls, 1):
+        total_tokens += call.estimated_tokens
+
+        console.print(f"[bold cyan]{i}. {call.prompt_id}[/bold cyan]")
+        console.print(f"   Profile: {call.profile} | Stage: {call.stage}")
+        console.print(f"   Estimated tokens: [yellow]{format_token_count(call.estimated_tokens)}[/yellow]")
+
+        # Show prompt preview (first 5 lines)
+        lines = call.rendered_prompt.split("\n")[:5]
+        preview = "\n".join(lines)
+        if len(call.rendered_prompt.split("\n")) > 5:
+            preview += "\n   ..."
+        console.print(f"   [dim]--- Prompt Preview ---[/dim]")
+        for line in preview.split("\n"):
+            console.print(f"   [dim]{line[:80]}{'...' if len(line) > 80 else ''}[/dim]")
+        console.print()
+
+    console.print("[bold]Summary[/bold]")
+    console.print(f"  Total stages: {len(result.planned_calls)}")
+    console.print(f"  Total estimated tokens: [yellow]{format_token_count(total_tokens)}[/yellow]")
+    console.print()
+    console.print("[dim]Note: Token estimates are approximate. Actual usage may vary by 10-20%.[/dim]")
+
+
+def _display_refinement_results(result) -> None:
+    """Display standard refinement results.
+
+    Includes the structured ImplementationReport to the terminal so the
+    current Claude Code session can see and act on the tasks.
+
+    Args:
+        result: RefinementResult from refinement.
+    """
     if result.success:
         console.print("\n[green]Refinement completed successfully![/green]\n")
     else:
@@ -242,14 +316,125 @@ def refine(
 
     if result.plan_path:
         console.print(f"\n[bold]Improvement plan written to:[/bold] {result.plan_path}")
+
+    # Display the implementation report for the current Claude Code session
+    if result.implementation_report and result.implementation_report.tasks:
+        _display_implementation_report(result.implementation_report)
+
+    if not result.implementation_report or not result.implementation_report.tasks:
         console.print("\nNext steps:")
         console.print("  1. Review the improvement plan")
         console.print("  2. Open Claude Code in your repository")
         console.print("  3. Ask Claude Code to implement the plan")
 
-    if result.error:
-        console.print(f"\n[red]Error:[/red] {result.error}")
-        raise typer.Exit(1)
+
+def _display_implementation_report(report) -> None:
+    """Display the structured implementation report for the current session.
+
+    This outputs the report in a format that Claude Code can read and act upon,
+    enabling the current Claude Code session to implement the tasks directly.
+
+    Args:
+        report: ImplementationReport with tasks and recommendations.
+    """
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold cyan]IMPLEMENTATION REPORT[/bold cyan]\n"
+        "[dim]Tasks for the current Claude Code session to implement[/dim]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Summary
+    console.print(f"[bold]Total Tasks:[/bold] {len(report.tasks)}")
+    if report.total_estimated_effort:
+        console.print(f"[bold]Estimated Effort:[/bold] {report.total_estimated_effort}")
+    console.print()
+
+    # Priority breakdown
+    priority_counts = {}
+    for task in report.tasks:
+        priority = task.priority.lower()
+        priority_counts[priority] = priority_counts.get(priority, 0) + 1
+
+    if priority_counts:
+        console.print("[bold]Tasks by Priority:[/bold]")
+        priority_emojis = {
+            "critical": "🔴",
+            "high": "🟠",
+            "medium": "🟡",
+            "low": "🟢",
+        }
+        for priority in ["critical", "high", "medium", "low"]:
+            count = priority_counts.get(priority, 0)
+            if count > 0:
+                emoji = priority_emojis.get(priority, "⚪")
+                console.print(f"  {emoji} {priority.title()}: {count}")
+        console.print()
+
+    # Display each task
+    console.print("[bold]Tasks to Implement:[/bold]")
+    console.print()
+
+    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    sorted_tasks = sorted(report.tasks, key=lambda t: priority_order.get(t.priority.lower(), 2))
+
+    for i, task in enumerate(sorted_tasks, 1):
+        priority = task.priority.lower()
+        emoji = {
+            "critical": "🔴",
+            "high": "🟠",
+            "medium": "🟡",
+            "low": "🟢",
+        }.get(priority, "⚪")
+
+        console.print(f"[bold]{i}. {emoji} {task.title}[/bold]")
+        console.print(f"   [dim]Priority:[/dim] {priority.title()}", end="")
+        if task.estimated_complexity:
+            console.print(f" | [dim]Complexity:[/dim] {task.estimated_complexity}", end="")
+        console.print()
+
+        if task.description and task.description != task.title:
+            # Truncate long descriptions
+            desc = task.description
+            if len(desc) > 200:
+                desc = desc[:200] + "..."
+            console.print(f"   {desc}")
+
+        if task.affected_files:
+            files = ", ".join(task.affected_files[:3])
+            if len(task.affected_files) > 3:
+                files += f" (+{len(task.affected_files) - 3} more)"
+            console.print(f"   [dim]Files:[/dim] {files}")
+
+        console.print()
+
+    # Display as markdown for easy copy-paste
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Markdown Summary[/bold]\n"
+        "[dim]Copy this to share or track progress[/dim]",
+        border_style="dim",
+    ))
+    console.print()
+    console.print(Markdown(report.to_markdown()))
+    console.print()
+
+    # Instructions for current session
+    console.print(Panel(
+        "[bold cyan]NEXT STEPS FOR CURRENT SESSION[/bold cyan]\n\n"
+        "1. Work through tasks in priority order (critical → low)\n"
+        "2. For each task:\n"
+        "   - Read the task description and affected files\n"
+        "   - Make the required code changes\n"
+        "   - Run tests to verify\n"
+        "3. After completing related tasks, commit your changes\n"
+        "4. Run meta-agent again to check for remaining issues",
+        border_style="green",
+    ))
 
 
 @app.command("refine-iterative")
@@ -420,6 +605,10 @@ def refine_iterative(
     if result.plan_path:
         console.print(f"\n[bold]Improvement plan written to:[/bold] {result.plan_path}")
 
+    # Display the implementation report for the current Claude Code session
+    if result.implementation_report and result.implementation_report.tasks:
+        _display_implementation_report(result.implementation_report)
+
     if result.error:
         console.print(f"\n[red]Error:[/red] {result.error}")
         raise typer.Exit(1)
@@ -433,8 +622,17 @@ def list_profiles(
         "-c",
         help="Path to config directory.",
     ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        "-V",
+        help="Validate that all referenced prompts exist.",
+    ),
 ) -> None:
-    """List available refinement profiles."""
+    """List available refinement profiles.
+
+    Use --validate to check if all prompts referenced by each profile exist.
+    """
     cfg_dir = get_config_dir(config_dir)
 
     if not cfg_dir.exists():
@@ -458,18 +656,75 @@ def list_profiles(
         console.print("[yellow]No profiles found.[/yellow]")
         return
 
-    table = Table(title="Available Profiles")
-    table.add_column("ID", style="cyan")
-    table.add_column("Description")
-    table.add_column("Stages", style="dim")
+    if validate:
+        # Detailed validation view
+        _show_profiles_with_validation(prompt_library, profiles)
+    else:
+        # Simple list view
+        table = Table(title="Available Profiles")
+        table.add_column("ID", style="cyan")
+        table.add_column("Description")
+        table.add_column("Stages", style="dim")
+
+        for profile in profiles:
+            stages = ", ".join(profile.stages[:3])
+            if len(profile.stages) > 3:
+                stages += f" (+{len(profile.stages) - 3} more)"
+            table.add_row(profile.name, profile.description, stages)
+
+        console.print(table)
+
+
+def _show_profiles_with_validation(
+    prompt_library: PromptLibrary, profiles: list
+) -> None:
+    """Display profiles with validation status for each stage.
+
+    Args:
+        prompt_library: The loaded prompt library.
+        profiles: List of Profile instances.
+    """
+    validation_results = prompt_library.validate_all_profiles()
+    has_errors = False
 
     for profile in profiles:
-        stages = ", ".join(profile.stages[:3])
-        if len(profile.stages) > 3:
-            stages += f" (+{len(profile.stages) - 3} more)"
-        table.add_row(profile.name, profile.description, stages)
+        # Get validation for this profile
+        profile_key = None
+        for key, val in validation_results.items():
+            if prompt_library.get_profile(key) == profile:
+                profile_key = key
+                break
 
-    console.print(table)
+        if profile_key is None:
+            continue
+
+        stage_validation = validation_results.get(profile_key, {})
+        valid_count = sum(1 for v in stage_validation.values() if v)
+        total_count = len(stage_validation)
+
+        # Profile header
+        if valid_count == total_count:
+            status = "[green]OK[/green]"
+        else:
+            status = f"[red]{total_count - valid_count} missing[/red]"
+            has_errors = True
+
+        console.print(f"\n[bold cyan]{profile.name}[/bold cyan] ({status})")
+        console.print(f"  [dim]{profile.description}[/dim]")
+        console.print("  [bold]Stages:[/bold]")
+
+        for stage, exists in stage_validation.items():
+            if exists:
+                icon = "[green]+[/green]"
+            else:
+                icon = "[red]X[/red]"
+            console.print(f"    {icon} {stage}")
+
+    console.print()
+
+    if has_errors:
+        console.print("[yellow]Warning:[/yellow] Some profiles reference missing prompts.")
+        console.print("[dim]Run 'metaagent list-prompts' to see available prompts.[/dim]")
 
 
 @app.command("list-prompts")

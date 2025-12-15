@@ -41,6 +41,13 @@ from .config import Config
 from .plan_writer import PlanWriter, StageResult
 from .prompts import Prompt, PromptLibrary
 from .repomix import RepomixRunner, RepomixResult
+from .strategies import (
+    CodeImplementationStrategy,
+    CurrentSessionStrategy,
+    SubprocessStrategy,
+    StrategyResult,
+    create_strategy,
+)
 from .tokens import estimate_tokens, format_token_count
 
 logger = logging.getLogger(__name__)
@@ -1271,6 +1278,62 @@ class Orchestrator:
         self.implementation_executor = ImplementationExecutor(
             config=self.config,
             claude_runner=self.claude_runner,
+        )
+
+        # Implementation strategy (default to current_session to return
+        # structured results instead of spawning subprocesses)
+        self.implementation_strategy: Optional[CodeImplementationStrategy] = None
+        if not config.mock_mode and not config.auto_implement:
+            # Default to current session strategy for non-auto-implement mode
+            self.implementation_strategy = CurrentSessionStrategy()
+        elif config.auto_implement:
+            # Use subprocess strategy when auto_implement is enabled
+            self.implementation_strategy = SubprocessStrategy(
+                timeout=config.claude_code_timeout,
+                model=config.claude_code_model,
+                max_turns=config.claude_code_max_turns,
+            )
+
+    def set_implementation_strategy(
+        self,
+        strategy: CodeImplementationStrategy,
+    ) -> None:
+        """Set the implementation strategy for code changes.
+
+        This method allows runtime switching between different implementation
+        approaches following the Strategy pattern.
+
+        Args:
+            strategy: The strategy to use (CurrentSessionStrategy or SubprocessStrategy).
+        """
+        logger.info(f"Setting implementation strategy to: {strategy.get_name()}")
+        self.implementation_strategy = strategy
+
+    def execute_with_strategy(
+        self,
+        task_plan: str,
+        plan_file: Optional[Path] = None,
+    ) -> StrategyResult:
+        """Execute implementation using the configured strategy.
+
+        This method is the primary way to invoke code implementation,
+        returning structured results for the current session.
+
+        Args:
+            task_plan: The task plan or prompt for implementation.
+            plan_file: Optional path to an improvement plan file.
+
+        Returns:
+            StrategyResult with the execution outcome.
+        """
+        if not self.implementation_strategy:
+            logger.warning("No implementation strategy set, defaulting to CurrentSessionStrategy")
+            self.implementation_strategy = CurrentSessionStrategy()
+
+        return self.implementation_strategy.execute(
+            repo_path=self.config.repo_path,
+            task_plan=task_plan,
+            plan_file=plan_file,
         )
 
     def refine(self, profile_id: str) -> RefinementResult:
