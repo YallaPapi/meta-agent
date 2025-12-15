@@ -227,20 +227,22 @@ IMPORTANT:
 
 ## Output Format
 
-Respond with valid JSON only:
+Respond with valid JSON. Fill in ALL fields with your analysis:
 
 ```json
 {{
-  "assessment": "Your actual assessment of this specific codebase",
+  "assessment": "[Write 2-3 sentences about the codebase state here]",
   "selected_prompts": [
     {{
-      "prompt_id": "actual_prompt_id_from_list_above",
-      "reasoning": "Your actual reasoning for this codebase",
-      "relevant_files": ["actual_file.py", "another_real_file.py"]
+      "prompt_id": "[Pick a real prompt_id from the list above]",
+      "reasoning": "[Explain why you picked this prompt]",
+      "relevant_files": ["[real_file.py from codebase]"]
     }}
   ]
 }}
 ```
+
+Remember: Replace everything in [brackets] with real values. Do not copy the brackets.
 
 JSON response:"""
 
