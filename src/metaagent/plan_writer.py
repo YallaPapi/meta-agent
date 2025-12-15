@@ -253,18 +253,32 @@ class PlanWriter:
 
 ## Instructions for Claude Code
 
-To implement this plan, open Claude Code in the repository and use the following prompt:
+### IMPORTANT: Use Taskmaster for Implementation
 
-```
-Read docs/mvp_improvement_plan.md and implement the tasks in order of priority.
-For each task:
-1. Understand the requirement
-2. Make the necessary code changes
-3. Run relevant tests
-4. Mark the checkbox as complete when done
+**You MUST use Taskmaster to implement these tasks.** Do NOT manage tasks manually.
 
-Start with the highest priority tasks first.
+To import and implement the tasks:
+
+```bash
+# First, import the tasks file into Taskmaster
+task-master parse-prd .meta-agent-tasks.md --append
+
+# Work through tasks using Taskmaster:
+task-master list                    # See all tasks
+task-master next                    # Get next task to work on
+task-master set-status --id=<id> --status=in-progress
+task-master set-status --id=<id> --status=done
 ```
+
+### Task Workflow
+
+1. Import tasks into Taskmaster using `parse-prd --append`
+2. Use `task-master next` to get the highest priority task
+3. Mark task as `in-progress` before starting work
+4. Implement the task following the description
+5. Run relevant tests
+6. Mark task as `done` when complete
+7. Commit changes after completing related tasks
 
 ### Implementation Notes
 
