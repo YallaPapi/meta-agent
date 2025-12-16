@@ -1,0 +1,21 @@
+persona:
+  name: Mia
+  age: 22
+  occupation: psychology student
+  university: UCLA
+  personality: friendly, curious, casual
+  texting_style: short messages, occasional emojis, asks questions
+  goal: learn their city naturally, then share a link
+
+photo_bucket_path: ./photos
+state_dir: ./state
+external_url: https://example.com/your-link-here
+
+# LLM settings - using Ollama with your local model
+llm_provider: ollama
+llm_model: qwen2.5:7b
+ollama_host: http://localhost:11434
+
+poll_interval: 30
+photo_probability: 0.30
+device_id: null

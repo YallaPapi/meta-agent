@@ -1,0 +1,5 @@
+state/
+test_state/
+test_results/
+codebase.xml
+*.json.corrupted.*
