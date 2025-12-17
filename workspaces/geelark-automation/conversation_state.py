@@ -111,7 +111,7 @@ class ConversationState:
             FunnelStage.INITIAL_RESPONSE: "chatting",
             FunnelStage.SMALL_TALK: "chatting",
             FunnelStage.LOCATION_EXCHANGE: "asking_location",
-            FunnelStage.MEETUP_TEASE: "got_location",
+            FunnelStage.VIBING: "got_location",
             FunnelStage.PLATFORM_REDIRECT: "sending_link",
             FunnelStage.OBJECTION_HANDLING: "sending_link",
             FunnelStage.VERIFICATION: "sent_link",

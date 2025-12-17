@@ -17,11 +17,19 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable
 
+import os
+
 try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
 
 from funnel_stages import (
     FunnelStage,
@@ -105,59 +113,109 @@ def build_stage_analyzer_prompt(
         content = msg.get("content", "")[:200]  # Truncate long messages
         history_text.append(f"[{role}]: {content}")
 
-    return f"""You are a conversation stage analyzer for an Instagram DM bot.
-Your job is to analyze the user's latest message and determine the current funnel stage.
+    # Count messages in history to determine progression
+    msg_count = len(conversation_history)
 
-## Funnel Stages Overview
-{chr(10).join(all_stages_context)}
+    return f"""You are a conversation stage analyzer for an Instagram DM bot converting users to OnlyFans.
 
-## Current Stage: {current_stage.value}
-{format_stage_context_for_llm(current_stage)}
+## THE GOAL
+Progress the conversation toward OnlyFans subscription. MOVE FORWARD through stages, don't get stuck.
 
-## Valid Transitions
-From {current_stage.value}, you can transition to: {', '.join(valid_stage_names)}
+## FUNNEL STAGES (in order)
+1. initial_response - ONLY for the very first reply to their first message. ONE exchange max.
+2. small_talk - Chat briefly, then ask "what city u in". 2-3 exchanges max.
+3. location_exchange - They said a city. Match it ("im in X too" or "visiting X soon").
+4. vibing - Keep chatting naturally. DO NOT suggest meetups. Wait for THEM to ask for contact.
+5. platform_redirect - THEY asked for snap/number/to meet. Redirect to OF (it's how you verify they're real).
+6. objection_handling - They pushed back. Stay chill, frame it as trust/verification.
+7. verification - They claim they subscribed. Ask username.
+8. converted - Confirmed. Move convo to OF.
+9. dead_lead - ONLY if they explicitly refuse multiple times or say "stop messaging me".
 
-## Conversation History
+## CURRENT STATE
+- Current stage: {current_stage.value}
+- Messages in conversation: {msg_count}
+
+## VALID NEXT STAGES (YOU MUST PICK FROM THIS LIST ONLY)
+{', '.join(valid_stage_names)}
+
+CRITICAL: Your next_stage output MUST be one of: {', '.join(valid_stage_names)}
+Any other value is INVALID and will cause an error.
+
+## CONVERSATION HISTORY
 {chr(10).join(history_text) if history_text else "(No prior messages)"}
 
-## Latest User Message
+## LATEST MESSAGE FROM USER
 "{user_message}"
 
-## Your Task
-Analyze the user's message and conversation context. Determine:
-1. What is the user's intent?
-2. Should we transition to a different stage?
-3. What stage should we be in?
-4. Did they mention a location, request another platform, object, or claim to have subscribed?
+## STAGE PROGRESSION RULES
 
-## CRITICAL RULES
-- Do NOT use keyword matching. Analyze the FULL context.
-- Consider the conversation history, not just the latest message.
-- Only transition if there's a clear reason to do so.
-- Stay in current stage if unsure.
-- Be conservative with stage transitions.
+SIMPLE RULE FOR PLATFORM_REDIRECT:
+- If message contains snap/number/insta/whatsapp -> STAY in platform_redirect
+- Only go to objection_handling if message is JUST "no"/"nah" without any platform word
 
-## IMPORTANT: What is NOT a dead_lead
-- Sexual/forward messages like "can we fuck", "send nudes", "you're hot" - these show INTEREST, not rejection
-  → Stay in current stage or move to small_talk, deflect playfully ("lol slow down, we just met 😂")
-- One-word responses or short messages - user is still engaged
-- User being flirty or suggestive - this is GOOD, redirect to building rapport
-- User asking personal questions - they're interested
+- initial_response → small_talk: After ANY reply
+- small_talk → location_exchange: When THEY mention a city
+- location_exchange → vibing: After location match
+- vibing → platform_redirect: When they ask for snap/number/insta
+- platform_redirect → objection_handling: ONLY "no"/"nah"/"don't use OF" with NO platform word
+- objection_handling → platform_redirect: If they ask for contact again
+- verification: If they claim subscribed
 
-## What IS a dead_lead (ONLY these):
-- User explicitly says "stop messaging me", "leave me alone", "not interested"
-- User blocks or reports
-- User is persistently hostile/rude after multiple attempts
-- User explicitly refuses to subscribe MULTIPLE times with finality ("never", "absolutely not")
-- Conversation has been completely cold for days (not applicable in single session)
+## CRITICAL: WHEN TO STAY IN PLATFORM_REDIRECT
+- If their message contains "snap", "number", "insta", "whatsapp", "telegram" = STAY in platform_redirect
+- "come on just give me your number" = STAY (contains "number")
+- "nice, whats your insta" = STAY (contains "insta")
+- "ok let me check it out" or "fine" = STAY (waiting)
+- ONLY move to objection_handling if they say: "no", "nah", "I don't use OF", "I don't pay", "not interested"
+- ONLY if they refuse WITHOUT mentioning any contact platform
 
-## Output Format
-Respond with ONLY valid JSON. No other text, no explanation.
+## CRITICAL: VIBING STAGE - READ CAREFULLY
+- In vibing stage, just chat naturally. STAY HERE unless they ask for contact.
+- These are VIBING (stay in vibing):
+  * "what do you do" = asking about job/life, NOT contact
+  * "thats cool" = just chatting
+  * "haha nice" = just chatting
+  * "we should hang" = flirty chat, NOT asking for contact yet
+- These are PLATFORM_REDIRECT (move to platform_redirect):
+  * "whats ur snap" = explicitly asking for contact
+  * "can i get ur number" = explicitly asking for contact
+  * "give me ur insta" = explicitly asking for contact
+  * "do you have whatsapp" = explicitly asking for contact
+- If they don't explicitly mention snap/number/insta/whatsapp/telegram, STAY IN VIBING
 
+## CRITICAL: SUBSCRIPTION DETECTION
+- If user says "i subscribed", "done subscribed", "just subbed", "ok i followed", "ok i subscribed":
+  - subscription_claimed = TRUE
+  - should_transition = TRUE
+  - next_stage = "verification"
+- THIS OVERRIDES EVERYTHING - if they claim subscription, ALWAYS go to verification
+- Example: "ok i subscribed" -> subscription_claimed: true, next_stage: "verification"
+
+## CRITICAL: WHEN TO TRANSITION
+- Message count is {msg_count}. If > 1 and still in initial_response, MUST transition to small_talk.
+- If in same stage for 3+ exchanges, SHOULD transition forward.
+- NEVER go backwards (e.g., small_talk back to initial_response).
+- Forward momentum is key - don't get stuck chatting forever.
+
+## WHAT IS NOT A DEAD_LEAD (STAY IN OBJECTION_HANDLING)
+- "i dont use onlyfans" = objection, NOT dead
+- "i dont pay for that" = objection, NOT dead
+- "thats weird" = objection, NOT dead
+- "nah" or "no thanks" = objection, NOT dead
+- Short responses = still engaged
+- Any response that isn't hostile = NOT dead
+
+## WHAT IS A DEAD_LEAD (ONLY THESE - BE VERY CONSERVATIVE)
+- "stop messaging me", "leave me alone", "fuck off"
+- Hostile/rude AND refuses multiple times
+- Explicitly says "NEVER" or "STOP"
+- Blocks you or reports you
+
+IMPORTANT: If unsure, stay in objection_handling. Only go to dead_lead if they're clearly done.
+
+## OUTPUT (JSON only, no other text)
 {STAGE_ANALYSIS_SCHEMA}
-
-## Example Output
-{{"current_stage": "{current_stage.value}", "detected_intent": "user asking casual question", "should_transition": false, "next_stage": "{current_stage.value}", "location_mentioned": null, "platform_requested": null, "objection_detected": false, "objection_type": null, "subscription_claimed": false, "sentiment": "neutral", "confidence": 0.8}}
 """
 
 
@@ -165,27 +223,38 @@ class StageAnalyzer:
     """LLM-based stage analyzer for conversation funnel.
 
     This is LLM 1 in the two-LLM pipeline.
+    Supports both Ollama (local/free) and Anthropic Haiku (fast/cheap).
     """
 
     def __init__(
         self,
-        model: str = "qwen2.5:7b",
+        provider: str = "anthropic",  # "anthropic" or "ollama"
+        model: str = "claude-3-haiku-20240307",
         ollama_host: str = "http://localhost:11434",
         metrics_callback: Optional[Callable] = None,
     ):
         """Initialize stage analyzer.
 
         Args:
-            model: Ollama model name
-            ollama_host: Ollama server URL
+            provider: "anthropic" (Haiku) or "ollama" (local)
+            model: Model name
+            ollama_host: Ollama server URL (only for ollama provider)
             metrics_callback: Optional callback for metrics
         """
-        if not HAS_REQUESTS:
-            raise ImportError("requests package not installed")
-
+        self.provider = provider
         self.model = model
         self.ollama_host = ollama_host
         self.metrics_callback = metrics_callback
+
+        if provider == "anthropic":
+            if not HAS_ANTHROPIC:
+                raise ImportError("anthropic package not installed. Run: pip install anthropic")
+            self.anthropic_client = anthropic.Anthropic()
+        elif provider == "ollama":
+            if not HAS_REQUESTS:
+                raise ImportError("requests package not installed")
+        else:
+            raise ValueError(f"Unknown provider: {provider}. Use 'anthropic' or 'ollama'")
 
     def analyze(
         self,
@@ -217,9 +286,12 @@ class StageAnalyzer:
             user_message=user_message,
         )
 
-        # Call Ollama
+        # Call LLM (Anthropic or Ollama)
         try:
-            raw_response = self._call_ollama(prompt, trace_id)
+            if self.provider == "anthropic":
+                raw_response = self._call_anthropic(prompt, trace_id)
+            else:
+                raw_response = self._call_ollama(prompt, trace_id)
             latency_ms = (time.time() - start_time) * 1000
 
             # Parse response
@@ -299,6 +371,32 @@ class StageAnalyzer:
             raise
         except requests.exceptions.Timeout:
             logger.error(f"[{trace_id}] Ollama request timed out")
+            raise
+
+    def _call_anthropic(self, prompt: str, trace_id: str) -> str:
+        """Call Anthropic API (Haiku).
+
+        Args:
+            prompt: System prompt
+            trace_id: Trace ID for logging
+
+        Returns:
+            Raw response text (JSON)
+        """
+        try:
+            message = self.anthropic_client.messages.create(
+                model=self.model,
+                max_tokens=500,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt + "\n\nRespond with ONLY the JSON object, no other text."
+                    }
+                ],
+            )
+            return message.content[0].text
+        except Exception as e:
+            logger.error(f"[{trace_id}] Anthropic API error: {e}")
             raise
 
     def _parse_response(
@@ -435,7 +533,7 @@ class MockStageAnalyzer:
         if location and current_stage in [FunnelStage.SMALL_TALK, FunnelStage.LOCATION_EXCHANGE]:
             next_stage = FunnelStage.LOCATION_EXCHANGE
             should_transition = True
-        elif platform and current_stage in [FunnelStage.MEETUP_TEASE, FunnelStage.PLATFORM_REDIRECT]:
+        elif platform and current_stage in [FunnelStage.VIBING, FunnelStage.PLATFORM_REDIRECT]:
             next_stage = FunnelStage.PLATFORM_REDIRECT
             should_transition = True
         elif objection and current_stage == FunnelStage.PLATFORM_REDIRECT:
@@ -471,7 +569,7 @@ if __name__ == "__main__":
     test_messages = [
         ("hey whats up", FunnelStage.INITIAL_RESPONSE),
         ("I'm from LA", FunnelStage.SMALL_TALK),
-        ("whats your snap?", FunnelStage.MEETUP_TEASE),
+        ("whats your snap?", FunnelStage.VIBING),
         ("nah I don't have OF", FunnelStage.PLATFORM_REDIRECT),
         ("ok done I subscribed", FunnelStage.OBJECTION_HANDLING),
     ]

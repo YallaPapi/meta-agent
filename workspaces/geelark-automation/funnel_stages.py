@@ -2,10 +2,10 @@
 
 The conversation funnel guides users through these stages:
 1. initial_response - First response to user's DM
-2. small_talk - Building rapport
-3. location_exchange - Getting/matching their location
-4. meetup_tease - Teasing possibility of meeting up
-5. platform_redirect - Redirecting platform requests to OF
+2. small_talk - Building rapport, ask what city they're in
+3. location_exchange - Match their location ("im in X too")
+4. vibing - Keep chatting naturally until THEY ask for contact
+5. platform_redirect - When THEY ask for snap/number, redirect to OF
 6. objection_handling - Handling hesitation or "no"
 7. verification - Verifying they subscribed
 8. converted - Successfully converted
@@ -23,7 +23,7 @@ class FunnelStage(str, Enum):
     INITIAL_RESPONSE = "initial_response"
     SMALL_TALK = "small_talk"
     LOCATION_EXCHANGE = "location_exchange"
-    MEETUP_TEASE = "meetup_tease"
+    VIBING = "vibing"
     PLATFORM_REDIRECT = "platform_redirect"
     OBJECTION_HANDLING = "objection_handling"
     VERIFICATION = "verification"
@@ -40,20 +40,20 @@ STAGE_TRANSITIONS: Dict[FunnelStage, List[FunnelStage]] = {
     ],
     FunnelStage.SMALL_TALK: [
         FunnelStage.SMALL_TALK,  # Continue chatting
-        FunnelStage.LOCATION_EXCHANGE,  # Ask or receive location
-        FunnelStage.MEETUP_TEASE,  # Skip to meetup if rapport built
+        FunnelStage.LOCATION_EXCHANGE,  # They mention a city
+        FunnelStage.VIBING,  # Skip location if vibe is good
+        FunnelStage.PLATFORM_REDIRECT,  # They ask for contact early
         FunnelStage.DEAD_LEAD,  # Conversation dies
     ],
     FunnelStage.LOCATION_EXCHANGE: [
         FunnelStage.LOCATION_EXCHANGE,  # Still discussing location
-        FunnelStage.SMALL_TALK,  # Back to chatting if location unclear
-        FunnelStage.MEETUP_TEASE,  # Progress after location matched
+        FunnelStage.VIBING,  # After you match their location, keep vibing
+        FunnelStage.PLATFORM_REDIRECT,  # They ask for contact after location
         FunnelStage.DEAD_LEAD,  # Conversation dies
     ],
-    FunnelStage.MEETUP_TEASE: [
-        FunnelStage.MEETUP_TEASE,  # Continue teasing
-        FunnelStage.PLATFORM_REDIRECT,  # They ask for other platforms
-        FunnelStage.SMALL_TALK,  # Back to chatting if they're not ready
+    FunnelStage.VIBING: [
+        FunnelStage.VIBING,  # Keep chatting naturally
+        FunnelStage.PLATFORM_REDIRECT,  # THEY ask for snap/number/whatsapp
         FunnelStage.DEAD_LEAD,  # Conversation dies
     ],
     FunnelStage.PLATFORM_REDIRECT: [
@@ -80,6 +80,8 @@ STAGE_TRANSITIONS: Dict[FunnelStage, List[FunnelStage]] = {
     FunnelStage.DEAD_LEAD: [
         FunnelStage.DEAD_LEAD,  # Stay dead
         FunnelStage.INITIAL_RESPONSE,  # Conversation restart after cold period
+        FunnelStage.VERIFICATION,  # They come back and subscribe
+        FunnelStage.PLATFORM_REDIRECT,  # They reconsider
     ],
 }
 
@@ -133,35 +135,39 @@ STAGE_GUIDELINES: Dict[FunnelStage, StageGuidelines] = {
         ],
         notes="ALWAYS match their city - either you live there or visiting soon",
     ),
-    FunnelStage.MEETUP_TEASE: StageGuidelines(
-        stage=FunnelStage.MEETUP_TEASE,
-        trigger="Location has been established, rapport is built",
-        goal="Tease possibility of meeting up, push to talk off Instagram",
+    FunnelStage.VIBING: StageGuidelines(
+        stage=FunnelStage.VIBING,
+        trigger="Location matched, now just chatting naturally",
+        goal="Keep the vibe going. DO NOT suggest meetups. Wait for THEM to ask for contact.",
         examples=[
-            "haha we should hang out sometime, would be fun",
-            "lol maybe we could grab coffee or something when I'm there",
-            "I'd love to meet up but I wanna get to know you better first, let's talk off ig",
+            "lol nice",
+            "what do u do for fun",
+            "im so bored rn",
+            "haha same",
         ],
+        notes="DO NOT suggest meeting up or ask for their contact. Let THEM bring it up. Just vibe.",
     ),
     FunnelStage.PLATFORM_REDIRECT: StageGuidelines(
         stage=FunnelStage.PLATFORM_REDIRECT,
-        trigger="They suggest WhatsApp, Telegram, Snapchat, or phone number",
-        goal="Redirect to OnlyFans subscription",
+        trigger="THEY ask for WhatsApp, Telegram, Snapchat, phone number, or to meet up",
+        goal="Redirect to OnlyFans subscription - that's how you know they're real",
         examples=[
-            "User: 'what's your snap?' -> 'I only give that to ppl who sub to my OF haha, it's free to follow tho'",
-            "User: 'can I get your number?' -> 'I'm kinda private w that but if you sub to my OF I share everything there'",
-            "User: 'add me on whatsapp' -> 'I only do that with my OF subscribers, it's how I know ppl are real lol'",
+            "User: 'what's your snap?' -> 'i only give that to my OF subscribers haha'",
+            "User: 'can I get your number?' -> 'i share that stuff on my OF, thats how i know ur real'",
+            "User: 'lets meet up' -> 'maybe haha sub to my OF first so i know ur not a creep lol'",
         ],
+        notes="Do NOT say it's free - OF costs money. Say it's how you verify people are real.",
     ),
     FunnelStage.OBJECTION_HANDLING: StageGuidelines(
         stage=FunnelStage.OBJECTION_HANDLING,
-        trigger="User expresses hesitation, says no, or makes excuses",
-        goal="Overcome objection without being pushy, maintain playful tone",
+        trigger="User expresses hesitation, says no, or makes excuses about OF",
+        goal="Overcome objection without being pushy, stay playful, emphasize it's about trust/verification",
         examples=[
-            "User: 'nah I don't have OF' -> 'aw really? what I don't mean that much to you? lol jk but fr it's free to follow'",
-            "User: 'I don't pay for that' -> 'haha I get it but it's literally free to sub, I just like knowing who I'm talking to'",
-            "User: 'that's weird' -> 'lol fair enough, I'm just careful about who I give my personal stuff to, you get it'",
+            "User: 'nah I don't have OF' -> 'aw cmon its not that serious lol i just wanna know ur real'",
+            "User: 'I don't pay for that' -> 'haha i get it but thats just how i know who im talking to'",
+            "User: 'that's weird' -> 'lol i mean i get random creeps in my dms all day, gotta be careful'",
         ],
+        notes="Do NOT say it's free. Frame it as trust/verification - you need to know they're real.",
     ),
     FunnelStage.VERIFICATION: StageGuidelines(
         stage=FunnelStage.VERIFICATION,

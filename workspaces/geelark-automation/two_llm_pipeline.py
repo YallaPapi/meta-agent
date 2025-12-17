@@ -70,8 +70,15 @@ class PipelineResult:
 class PipelineConfig:
     """Configuration for the two-LLM pipeline."""
 
-    model: str = "qwen2.5:7b"
+    # Response generator settings (LLM 2)
+    response_provider: str = "anthropic"  # "anthropic" (Haiku) or "ollama"
+    response_model: str = "claude-3-haiku-20240307"  # Haiku model
+
+    # Stage analyzer settings (LLM 1) - now also uses Haiku
+    analyzer_provider: str = "anthropic"  # "anthropic" (Haiku) or "ollama"
+    analyzer_model: str = "claude-3-haiku-20240307"
     ollama_host: str = "http://localhost:11434"
+
     state_dir: str = "./state"
     persona: Optional[PersonaConfig] = None
     mock_mode: bool = False
@@ -108,14 +115,18 @@ class TwoLLMPipeline:
                 persona=self.config.persona
             )
         else:
+            # Stage Analyzer: Uses Haiku (fast/accurate)
             self.stage_analyzer = StageAnalyzer(
-                model=self.config.model,
+                provider=self.config.analyzer_provider,
+                model=self.config.analyzer_model,
                 ollama_host=self.config.ollama_host,
                 metrics_callback=metrics_callback,
             )
+            # Response Generator: Uses Anthropic Haiku (fast/cheap)
             self.response_generator = ResponseGenerator(
                 persona=self.config.persona,
-                model=self.config.model,
+                provider=self.config.response_provider,
+                model=self.config.response_model,
                 ollama_host=self.config.ollama_host,
                 metrics_callback=metrics_callback,
             )
@@ -257,10 +268,19 @@ class TwoLLMPipeline:
             state.objections_count += 1
             logger.debug(f"Objection #{state.objections_count} detected")
 
-        # Track subscription claims
+        # Track subscription claims - FORCE transition to verification
         if analysis.subscription_claimed:
             state.subscription_claimed = True
             logger.debug("Subscription claimed by user")
+            # Force transition to verification if not already there
+            current = state.get_funnel_stage()
+            if current not in (FunnelStage.VERIFICATION, FunnelStage.CONVERTED):
+                if is_valid_transition(current, FunnelStage.VERIFICATION):
+                    state.set_funnel_stage(FunnelStage.VERIFICATION)
+                    # Also update the analysis so response generator uses correct stage
+                    analysis.next_stage = FunnelStage.VERIFICATION
+                    analysis.should_transition = True
+                    logger.info(f"FORCED transition to verification (subscription claimed)")
 
         # Check for terminal states
         final_stage = state.get_funnel_stage()
@@ -305,7 +325,10 @@ class TwoLLMPipeline:
 
 def create_pipeline(
     mock_mode: bool = False,
-    model: str = "qwen2.5:7b",
+    response_provider: str = "anthropic",
+    response_model: str = "claude-3-haiku-20240307",
+    analyzer_provider: str = "anthropic",
+    analyzer_model: str = "claude-3-haiku-20240307",
     ollama_host: str = "http://localhost:11434",
     state_dir: str = "./state",
     persona: Optional[PersonaConfig] = None,
@@ -314,7 +337,10 @@ def create_pipeline(
 
     Args:
         mock_mode: If True, use mock LLMs for testing
-        model: Ollama model name
+        response_provider: "anthropic" (Haiku) or "ollama" for response gen
+        response_model: Model for response generation
+        analyzer_provider: "anthropic" (Haiku) or "ollama" for stage analysis
+        analyzer_model: Model for stage analysis
         ollama_host: Ollama server URL
         state_dir: Directory for state persistence
         persona: Persona configuration
@@ -323,7 +349,10 @@ def create_pipeline(
         Configured TwoLLMPipeline instance
     """
     config = PipelineConfig(
-        model=model,
+        response_provider=response_provider,
+        response_model=response_model,
+        analyzer_provider=analyzer_provider,
+        analyzer_model=analyzer_model,
         ollama_host=ollama_host,
         state_dir=state_dir,
         persona=persona,

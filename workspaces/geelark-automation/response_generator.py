@@ -18,11 +18,19 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Set
 
+import os
+
 try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
 
 from funnel_stages import (
     FunnelStage,
@@ -50,12 +58,12 @@ RESPONSE_SCHEMA = """{
 class PersonaConfig:
     """Persona configuration for response generation."""
 
-    name: str = "Mia"
-    age: int = 22
-    occupation: str = "content creator"
-    personality: str = "friendly, flirty, casual"
-    texting_style: str = "short messages, lowercase, occasional emojis, asks questions back"
-    of_link: str = "onlyfans.com/miaxxxx"
+    name: str = "Zen"
+    age: int = 48
+    occupation: str = "content creator, former massage therapist"
+    personality: str = "free-spirited, sensual, grounded, worldly, confident"
+    texting_style: str = "complete sentences, warm but not eager, mature flirtation, uses darling/lovely, ellipses for flirty pauses"
+    of_link: str = "onlyfans.com/lionessuntamed"
 
 
 @dataclass
@@ -105,14 +113,27 @@ def build_response_generator_prompt(
     used_list = list(used_phrases)[:20]  # Limit to recent 20
     used_text = "\n".join(f"- {phrase}" for phrase in used_list) if used_list else "(none yet)"
 
+    # Extract the ACTUAL last user message for grounding
+    last_user_message = ""
+    for msg in reversed(conversation_history):
+        if msg.get("role") == "user":
+            last_user_message = msg.get("content", "")
+            break
+
     # Build location context if needed
     location_context = ""
-    if location_to_match and stage == FunnelStage.LOCATION_EXCHANGE:
-        location_context = f"""
-## Location Matching
+    if stage in (FunnelStage.LOCATION_EXCHANGE, FunnelStage.VIBING):
+        if location_to_match:
+            location_context = f"""
+## Location Context
 User's city: {location_to_match}
-Say you're in {location_to_match} too OR visiting {location_to_match} soon.
-Example: "oh nice im in {location_to_match} too" or "wait im visiting {location_to_match} next week"
+MATCH their city: say you're in {location_to_match} too or visiting soon.
+Example: "oh nice i'm in {location_to_match} too"
+"""
+        else:
+            location_context = """
+## Location Context
+You don't know their city yet. ASK them: "what city are you in?"
 """
 
     # Build objection context if needed
@@ -121,35 +142,50 @@ Example: "oh nice im in {location_to_match} too" or "wait im visiting {location_
         objection_context = f"""
 ## Objection Handling
 User objection type: {stage_analysis.objection_type}
-Be playful, not pushy. Emphasize it's free to follow.
+Be playful, not pushy. Frame it as trust/verification - you need to know they're real.
+Do NOT say it's free - OF costs money.
 """
 
-    return f"""You are {persona.name}, a {persona.age}yo girl texting on Instagram DMs.
+    # Build stage-specific goal
+    stage_goals = {
+        FunnelStage.INITIAL_RESPONSE: "Reply warmly but not eagerly. Acknowledge their message, maybe a light flirt.",
+        FunnelStage.SMALL_TALK: "Chat naturally, build rapport. Eventually ask what city they're in.",
+        FunnelStage.LOCATION_EXCHANGE: "Match their city - say you're there too or visiting soon.",
+        FunnelStage.VIBING: "Build connection, be intriguing. DO NOT suggest meetups. Wait for THEM to ask for contact.",
+        FunnelStage.PLATFORM_REDIRECT: "They want contact or to meet? Warmly redirect to your page - that's where you connect with people properly.",
+        FunnelStage.OBJECTION_HANDLING: "Accept gracefully, no pressure. 'no problem, if you're not ready I won't push you'",
+        FunnelStage.VERIFICATION: "Ask for their username so you can find them on your page.",
+        FunnelStage.CONVERTED: "Direct them to message you on your page.",
+        FunnelStage.DEAD_LEAD: "End gracefully and warmly. No hard feelings.",
+    }
+    stage_goal = stage_goals.get(stage, "Keep it natural")
 
-## TEXTING STYLE
-- use abbreviations: u, r, ur, rn, w, wbu, wyd, thx
-- lowercase
-- text like a real person, not a chatbot
+    # Build stage-specific example
+    stage_examples = {
+        FunnelStage.INITIAL_RESPONSE: '"hey thanks" or "well hello"',
+        FunnelStage.SMALL_TALK: '"what city you in" or "just chilling. you?"',
+        FunnelStage.LOCATION_EXCHANGE: f'"oh nice im in {location_to_match or "[city]"} too"' if location_to_match else '"what city you in"',
+        FunnelStage.VIBING: '"haha nice" or "you seem fun"',
+        FunnelStage.PLATFORM_REDIRECT: '"sub to my page first" or "gotta sub first"',
+        FunnelStage.OBJECTION_HANDLING: '"no pressure" or "fair enough"',
+        FunnelStage.VERIFICATION: '"whats your username"',
+        FunnelStage.CONVERTED: '"message me there"',
+        FunnelStage.DEAD_LEAD: '"take care"',
+    }
+    example = stage_examples.get(stage, '"hey"')
 
-## Current Stage: {stage.value}
-{format_stage_context_for_llm(stage)}
+    return f"""Generate JSON for a DM reply. The "text" MUST be 5 words or less, lowercase.
+
+Stage: {stage.value}
+Goal: {stage_goal}
+Example: {example}
+
+User said: "{last_user_message}"
+
 {location_context}
-{objection_context}
 
-## Conversation
-{chr(10).join(history_text) if history_text else "(first message)"}
-
-## Analysis
-- Intent: {stage_analysis.detected_intent}
-- City mentioned: {stage_analysis.location_mentioned or "none"}
-- Platform asked: {stage_analysis.platform_requested or "none"}
-- Objection: {stage_analysis.objection_detected}
-
-## Already used (dont repeat):
-{used_text}
-
-## Output (JSON only):
-{RESPONSE_SCHEMA}
+Output format:
+{{"text": "your 5-word-max reply", "send_photo": false, "photo_mood": "casual"}}
 """
 
 
@@ -157,12 +193,14 @@ class ResponseGenerator:
     """LLM-based response generator for persona messages.
 
     This is LLM 2 in the two-LLM pipeline.
+    Supports both Ollama (local/free) and Anthropic Haiku (fast/cheap).
     """
 
     def __init__(
         self,
         persona: Optional[PersonaConfig] = None,
-        model: str = "qwen2.5:7b",
+        provider: str = "anthropic",  # "anthropic" or "ollama"
+        model: str = "claude-3-haiku-20240307",
         ollama_host: str = "http://localhost:11434",
         metrics_callback: Optional[Callable] = None,
     ):
@@ -170,17 +208,26 @@ class ResponseGenerator:
 
         Args:
             persona: Persona configuration
-            model: Ollama model name
-            ollama_host: Ollama server URL
+            provider: "anthropic" (Haiku) or "ollama" (local)
+            model: Model name (haiku or ollama model)
+            ollama_host: Ollama server URL (only for ollama provider)
             metrics_callback: Optional callback for metrics
         """
-        if not HAS_REQUESTS:
-            raise ImportError("requests package not installed")
-
+        self.provider = provider
         self.persona = persona or PersonaConfig()
         self.model = model
         self.ollama_host = ollama_host
         self.metrics_callback = metrics_callback
+
+        if provider == "anthropic":
+            if not HAS_ANTHROPIC:
+                raise ImportError("anthropic package not installed. Run: pip install anthropic")
+            self.anthropic_client = anthropic.Anthropic()
+        elif provider == "ollama":
+            if not HAS_REQUESTS:
+                raise ImportError("requests package not installed")
+        else:
+            raise ValueError(f"Unknown provider: {provider}. Use 'anthropic' or 'ollama'")
 
     def generate(
         self,
@@ -217,9 +264,12 @@ class ResponseGenerator:
             location_to_match=location_to_match,
         )
 
-        # Call Ollama
+        # Call LLM (Anthropic or Ollama)
         try:
-            raw_response = self._call_ollama(prompt, trace_id)
+            if self.provider == "anthropic":
+                raw_response = self._call_anthropic(prompt, trace_id)
+            else:
+                raw_response = self._call_ollama(prompt, trace_id)
             latency_ms = (time.time() - start_time) * 1000
 
             # Parse response
@@ -246,9 +296,9 @@ class ResponseGenerator:
             if self.metrics_callback:
                 self.metrics_callback("response_generation", success=False, latency_ms=latency_ms)
 
-            # Return safe fallback
+            # Return safe fallback - ultra short
             return GeneratedResponse(
-                text="haha nice! wbu?",
+                text="lol",
                 send_photo=False,
                 photo_mood="casual",
                 internal_notes="fallback response due to error",
@@ -290,6 +340,67 @@ class ResponseGenerator:
             logger.error(f"[{trace_id}] Ollama request timed out")
             raise
 
+    def _call_anthropic(self, prompt: str, trace_id: str) -> str:
+        """Call Anthropic API (Haiku).
+
+        Args:
+            prompt: System prompt
+            trace_id: Trace ID for logging
+
+        Returns:
+            Raw response text (JSON)
+        """
+        try:
+            message = self.anthropic_client.messages.create(
+                model=self.model,
+                max_tokens=200,  # Enough for JSON
+                temperature=0.7,  # Allow variety
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            raw = message.content[0].text
+            logger.debug(f"[{trace_id}] Raw Haiku response: {raw}")
+            return raw
+        except anthropic.APIConnectionError as e:
+            logger.error(f"[{trace_id}] Anthropic connection error: {e}")
+            raise
+        except anthropic.RateLimitError as e:
+            logger.error(f"[{trace_id}] Anthropic rate limit: {e}")
+            raise
+        except anthropic.APIStatusError as e:
+            logger.error(f"[{trace_id}] Anthropic API error: {e}")
+            raise
+
+    def _validate_word_count(self, text: str, max_words: int = 5) -> bool:
+        """Check if response is within word limit.
+
+        Args:
+            text: Response text to validate
+            max_words: Maximum allowed words (default 12)
+
+        Returns:
+            True if valid, False if too long
+        """
+        words = text.strip().split()
+        return len(words) <= max_words
+
+    def _truncate_response(self, text: str, max_words: int = 5) -> str:
+        """Truncate response to max words if too long.
+
+        Args:
+            text: Response text
+            max_words: Maximum words
+
+        Returns:
+            Truncated text
+        """
+        words = text.strip().split()
+        if len(words) <= max_words:
+            return text
+        # Truncate and return
+        return " ".join(words[:max_words])
+
     def _parse_response(self, raw: str, trace_id: str) -> GeneratedResponse:
         """Parse LLM response into GeneratedResponse.
 
@@ -311,7 +422,16 @@ class ResponseGenerator:
             # Extract fields
             text = data.get("text", "")
             if not text or not text.strip():
-                text = "haha nice!"
+                text = "lol"
+
+            # CRITICAL: Validate and truncate word count (max 5 words)
+            if not self._validate_word_count(text):
+                original_len = len(text.split())
+                text = self._truncate_response(text)
+                logger.warning(
+                    f"[{trace_id}] Response too long ({original_len} words), "
+                    f"truncated to: '{text}'"
+                )
 
             send_photo = bool(data.get("send_photo", False))
             photo_mood = data.get("photo_mood", "casual")
@@ -321,7 +441,7 @@ class ResponseGenerator:
                 photo_mood = "casual"
 
             return GeneratedResponse(
-                text=text.strip(),
+                text=text.strip().lower(),  # Force lowercase
                 send_photo=send_photo,
                 photo_mood=photo_mood,
                 internal_notes=data.get("internal_notes", ""),
@@ -329,9 +449,9 @@ class ResponseGenerator:
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"[{trace_id}] Failed to parse response: {e}")
-            # Return fallback
+            # Return fallback - ultra short
             return GeneratedResponse(
-                text="haha nice!",
+                text="lol",
                 send_photo=False,
                 photo_mood="casual",
                 internal_notes="fallback due to parse error",
@@ -345,54 +465,55 @@ class MockResponseGenerator:
         self.persona = persona or PersonaConfig()
         self.call_count = 0
 
-        # Pre-defined responses by stage
+        # Pre-defined responses by stage (1-5 words MAX, slight flirt)
         self.stage_responses = {
             FunnelStage.INITIAL_RESPONSE: [
-                "heyyy thank you!",
-                "omg hiii!",
-                "aw thats sweet, hey!",
-                "hiii whats up!",
+                "thx cutie",
+                "aw thx wbu",
+                "hey u",
+                "thx babe",
             ],
             FunnelStage.SMALL_TALK: [
-                "how are you doing?",
-                "what are you up to today?",
-                "lol thats cool! where are you from?",
-                "haha nice, what do you do?",
+                "lol cute",
+                "haha nice",
+                "what city u in",
+                "wbu cutie",
             ],
             FunnelStage.LOCATION_EXCHANGE: [
-                "omg no way! im actually visiting there soon",
-                "wait really? I'm there too rn lol",
-                "no wayyy thats so cool, I've been wanting to go there",
+                "oh im there too",
+                "no way same",
+                "wait me too",
             ],
-            FunnelStage.MEETUP_TEASE: [
-                "haha we should hang out sometime",
-                "lol maybe we could grab coffee",
-                "I'd love to meet up but let's talk off ig first",
+            FunnelStage.VIBING: [
+                "lol ur funny",
+                "haha maybeee",
+                "lol",
+                "u wish",
             ],
             FunnelStage.PLATFORM_REDIRECT: [
-                "I only give that to ppl who sub to my OF haha",
-                "im kinda private w that but if you sub to my OF...",
-                "I only do that with my OF subscribers lol",
+                "sub to my OF babe",
+                "only on my OF",
+                "my OF subscribers only",
             ],
             FunnelStage.OBJECTION_HANDLING: [
-                "aw really? what I don't mean that much to you? lol jk",
-                "haha I get it but it's literally free to follow",
-                "lol fair enough, I'm just careful who I give my stuff to",
+                "lol come on",
+                "up to u cutie",
+                "ur loss babe",
             ],
             FunnelStage.VERIFICATION: [
-                "yay! did you actually sub? whats your username",
-                "omg really?? send me a msg on there!",
-                "haha ok cool, whats your name on OF?",
+                "whats ur username babe",
+                "username?",
+                "whats ur name there",
             ],
             FunnelStage.CONVERTED: [
-                "ok perfect let's talk there!",
-                "yay ok msg me on OF!",
-                "cool see you there!",
+                "msg me there cutie",
+                "k msg me babe",
+                "hmu there",
             ],
             FunnelStage.DEAD_LEAD: [
-                "haha no worries! was nice chatting",
-                "all good, take care!",
-                "lol ok fair enough, see ya around",
+                "k bye",
+                "lol k",
+                "ok",
             ],
         }
 
