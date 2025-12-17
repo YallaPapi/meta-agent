@@ -71,12 +71,12 @@ class PipelineConfig:
     """Configuration for the two-LLM pipeline."""
 
     # Response generator settings (LLM 2)
-    response_provider: str = "anthropic"  # "anthropic" (Haiku) or "ollama"
-    response_model: str = "claude-3-haiku-20240307"  # Haiku model
+    response_provider: str = "openai"  # "openai", "anthropic", or "ollama"
+    response_model: str = "gpt-5-mini"
 
-    # Stage analyzer settings (LLM 1) - now also uses Haiku
-    analyzer_provider: str = "anthropic"  # "anthropic" (Haiku) or "ollama"
-    analyzer_model: str = "claude-3-haiku-20240307"
+    # Stage analyzer settings (LLM 1)
+    analyzer_provider: str = "openai"  # "openai", "anthropic", or "ollama"
+    analyzer_model: str = "gpt-5-mini"
     ollama_host: str = "http://localhost:11434"
 
     state_dir: str = "./state"

@@ -32,6 +32,12 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
+try:
+    import openai
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
 from funnel_stages import (
     FunnelStage,
     STAGE_GUIDELINES,
@@ -193,14 +199,14 @@ class ResponseGenerator:
     """LLM-based response generator for persona messages.
 
     This is LLM 2 in the two-LLM pipeline.
-    Supports both Ollama (local/free) and Anthropic Haiku (fast/cheap).
+    Supports OpenAI (gpt-5-mini), Anthropic (Haiku), and Ollama (local).
     """
 
     def __init__(
         self,
         persona: Optional[PersonaConfig] = None,
-        provider: str = "anthropic",  # "anthropic" or "ollama"
-        model: str = "claude-3-haiku-20240307",
+        provider: str = "openai",  # "openai", "anthropic", or "ollama"
+        model: str = "gpt-5-mini",
         ollama_host: str = "http://localhost:11434",
         metrics_callback: Optional[Callable] = None,
     ):
@@ -208,8 +214,8 @@ class ResponseGenerator:
 
         Args:
             persona: Persona configuration
-            provider: "anthropic" (Haiku) or "ollama" (local)
-            model: Model name (haiku or ollama model)
+            provider: "openai" (gpt-5-mini), "anthropic" (Haiku), or "ollama" (local)
+            model: Model name
             ollama_host: Ollama server URL (only for ollama provider)
             metrics_callback: Optional callback for metrics
         """
@@ -219,7 +225,11 @@ class ResponseGenerator:
         self.ollama_host = ollama_host
         self.metrics_callback = metrics_callback
 
-        if provider == "anthropic":
+        if provider == "openai":
+            if not HAS_OPENAI:
+                raise ImportError("openai package not installed. Run: pip install openai")
+            self.openai_client = openai.OpenAI()
+        elif provider == "anthropic":
             if not HAS_ANTHROPIC:
                 raise ImportError("anthropic package not installed. Run: pip install anthropic")
             self.anthropic_client = anthropic.Anthropic()
@@ -227,7 +237,7 @@ class ResponseGenerator:
             if not HAS_REQUESTS:
                 raise ImportError("requests package not installed")
         else:
-            raise ValueError(f"Unknown provider: {provider}. Use 'anthropic' or 'ollama'")
+            raise ValueError(f"Unknown provider: {provider}. Use 'openai', 'anthropic', or 'ollama'")
 
     def generate(
         self,
@@ -264,9 +274,11 @@ class ResponseGenerator:
             location_to_match=location_to_match,
         )
 
-        # Call LLM (Anthropic or Ollama)
+        # Call LLM (OpenAI, Anthropic, or Ollama)
         try:
-            if self.provider == "anthropic":
+            if self.provider == "openai":
+                raw_response = self._call_openai(prompt, trace_id)
+            elif self.provider == "anthropic":
                 raw_response = self._call_anthropic(prompt, trace_id)
             else:
                 raw_response = self._call_ollama(prompt, trace_id)
@@ -305,6 +317,38 @@ class ResponseGenerator:
                 trace_id=trace_id,
                 latency_ms=latency_ms,
             )
+
+    def _call_openai(self, prompt: str, trace_id: str) -> str:
+        """Call OpenAI API (gpt-5-mini).
+
+        Args:
+            prompt: System prompt
+            trace_id: Trace ID for logging
+
+        Returns:
+            Raw response text (JSON)
+        """
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.model,
+                max_tokens=200,
+                temperature=0.7,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            raw = response.choices[0].message.content
+            logger.debug(f"[{trace_id}] Raw OpenAI response: {raw}")
+            return raw
+        except openai.APIConnectionError as e:
+            logger.error(f"[{trace_id}] OpenAI connection error: {e}")
+            raise
+        except openai.RateLimitError as e:
+            logger.error(f"[{trace_id}] OpenAI rate limit: {e}")
+            raise
+        except openai.APIStatusError as e:
+            logger.error(f"[{trace_id}] OpenAI API error: {e}")
+            raise
 
     def _call_ollama(self, prompt: str, trace_id: str) -> str:
         """Call Ollama API.
