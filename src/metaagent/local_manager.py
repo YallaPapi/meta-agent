@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from typing import List, Optional
 
 import git
 from git.exc import GitCommandError, InvalidGitRepositoryError
+
+# Platform-specific settings
+IS_WINDOWS = platform.system() == "Windows"
 
 from .config import LoopConfig
 
@@ -233,10 +237,13 @@ class LocalRepoManager:
         cmd = command or self.config.test_command
 
         # Convert string command to list for subprocess
-        # Note: shlex.split with posix=True (default) works on both Unix and Windows
-        # for typical test commands like "pytest -q"
+        # Note: We use posix=True even on Windows because:
+        # 1. Typical test commands like "pytest -q" work fine with posix=True
+        # 2. posix=False keeps quotes around arguments which breaks "python -c ..."
+        # 3. If users have Windows-specific paths with backslashes, they should
+        #    use forward slashes (Python handles this) or provide a list
         if isinstance(cmd, str):
-            cmd_list = shlex.split(cmd)
+            cmd_list = shlex.split(cmd, posix=True)
         else:
             cmd_list = list(cmd)
 

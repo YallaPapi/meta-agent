@@ -1275,6 +1275,255 @@ def list_prompts(
         console.print()
 
 
+@app.command("loop")
+def task_loop(
+    prd: Path = typer.Option(
+        ...,
+        "--prd",
+        help="Path to PRD file describing what to build.",
+    ),
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        "-r",
+        help="Path to the target repository.",
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        "-c",
+        help="Path to meta-agent config directory.",
+    ),
+    max_iterations: Optional[int] = typer.Option(
+        None,
+        "--max-iterations",
+        "-n",
+        help="Maximum iterations (default: unlimited for pro, 5 for free).",
+    ),
+    human_approve: bool = typer.Option(
+        True,
+        "--human-approve/--no-human-approve",
+        help="Require human approval before implementing each task.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview tasks without implementation (no API calls).",
+    ),
+    pro_key: Optional[str] = typer.Option(
+        None,
+        "--pro-key",
+        envvar="METAAGENT_PRO_KEY",
+        help="Pro license key for unlimited iterations.",
+    ),
+    test_command: Optional[str] = typer.Option(
+        None,
+        "--test-command",
+        "-t",
+        help="Test command to run after each implementation (default: pytest -q).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Enable verbose output.",
+    ),
+) -> None:
+    """Run autonomous task loop: PRD -> tasks -> implement -> test -> fix.
+
+    This command parses a PRD into structured tasks and implements them
+    one by one in an autonomous loop. Each task goes through:
+
+    1. Parse PRD into prioritized tasks (using Grok)
+    2. Get next pending task
+    3. Human approval (optional)
+    4. Implement task with Claude
+    5. Run tests
+    6. If tests fail, diagnose with Grok and retry
+    7. Commit changes
+    8. Repeat until all tasks complete or limit reached
+
+    FREE TIER: Limited to 5 iterations per PRD.
+    PRO: Unlimited iterations with valid license key.
+
+    Examples:
+        # Basic usage (free tier, 5 iterations max):
+        metaagent loop --prd docs/prd.md
+
+        # With pro key for unlimited:
+        metaagent loop --prd docs/prd.md --pro-key YOUR_KEY
+
+        # Skip human approval for fully autonomous:
+        metaagent loop --prd docs/prd.md --no-human-approve
+
+        # Preview tasks without implementing:
+        metaagent loop --prd docs/prd.md --dry-run
+
+        # Custom test command:
+        metaagent loop --prd docs/prd.md --test-command "npm test"
+    """
+    setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    # Resolve paths
+    repo_path = repo.resolve()
+    if not repo_path.exists():
+        console.print(f"[red]Error:[/red] Repository does not exist: {repo_path}")
+        raise typer.Exit(1)
+
+    prd_path = prd.resolve()
+    if not prd_path.exists():
+        console.print(f"[red]Error:[/red] PRD file not found: {prd_path}")
+        raise typer.Exit(1)
+
+    # Resolve config directory
+    cfg_dir = get_config_dir(config_dir)
+    if not cfg_dir.exists():
+        console.print(f"[red]Error:[/red] Config directory not found: {cfg_dir}")
+        console.print("[dim]Hint: Use --config-dir to specify the meta-agent config location[/dim]")
+        raise typer.Exit(1)
+
+    # Load configuration
+    config = Config.from_env(repo_path)
+    config.config_dir = cfg_dir
+
+    if dry_run:
+        config.dry_run = True
+
+    if test_command:
+        config.loop.test_command = test_command
+
+    # Validate configuration
+    errors = config.validate()
+    if errors:
+        console.print("[red]Configuration errors:[/red]")
+        for error in errors:
+            console.print(f"  - {error}")
+        raise typer.Exit(1)
+
+    # Determine tier info
+    is_pro = pro_key is not None
+    effective_limit = max_iterations if max_iterations else (999 if is_pro else 5)
+
+    # Display configuration
+    console.print(f"\n[bold cyan]Meta-Agent Task Loop[/bold cyan]")
+    console.print(f"[dim]PRD:[/dim] {prd_path}")
+    console.print(f"[dim]Target repo:[/dim] {repo_path}")
+    console.print(f"[dim]Tier:[/dim] {'[green]Pro[/green]' if is_pro else '[yellow]Free (5 iterations max)[/yellow]'}")
+    console.print(f"[dim]Max iterations:[/dim] {effective_limit}")
+    console.print(f"[dim]Human approval:[/dim] {'enabled' if human_approve else 'disabled'}")
+    console.print(f"[dim]Test command:[/dim] {test_command or config.loop.test_command}")
+    console.print(f"[dim]Dry run:[/dim] {'yes' if dry_run else 'no'}")
+    console.print()
+
+    # Load prompt library (needed for orchestrator)
+    try:
+        prompt_library = PromptLibrary(
+            prompts_path=config.prompts_file,
+            profiles_path=config.profiles_file,
+            prompt_library_path=config.prompt_library_path,
+        )
+        prompt_library.load()
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+        raise typer.Exit(1)
+
+    # Run the task loop
+    orchestrator = Orchestrator(config, prompt_library=prompt_library)
+    result = orchestrator.run_task_loop(
+        prd_path=str(prd_path),
+        max_iterations=max_iterations,
+        human_approve=human_approve,
+        dry_run=dry_run,
+        free_tier_limit=5,
+        pro_key=pro_key,
+    )
+
+    _display_task_loop_results(result)
+
+    if result.error:
+        console.print(f"\n[red]Error:[/red] {result.error}")
+        raise typer.Exit(1)
+
+
+def _display_task_loop_results(result) -> None:
+    """Display results from the task-based autonomous loop.
+
+    Args:
+        result: TaskLoopResult from the task loop.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if result.success:
+        console.print("\n[green]Task loop completed successfully![/green]\n")
+    else:
+        console.print("\n[yellow]Task loop completed with issues.[/yellow]\n")
+
+    console.print(Panel.fit(
+        "[bold cyan]TASK LOOP SUMMARY[/bold cyan]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Summary stats
+    console.print(f"[bold]Tasks:[/bold] {result.tasks_completed}/{result.tasks_total} completed")
+    console.print(f"[bold]Iterations:[/bold] {result.iterations}")
+    console.print(f"[bold]Fixes applied:[/bold] {result.total_fixes}")
+    console.print(f"[bold]Tier:[/bold] {'[green]Pro[/green]' if result.is_pro else '[yellow]Free[/yellow]'}")
+    console.print()
+
+    # Show branch info if created
+    if result.branch_name:
+        console.print(f"[bold]Work branch:[/bold] {result.branch_name}")
+        console.print()
+
+    # Show final evaluation if available
+    if result.final_evaluation:
+        console.print(Panel(
+            f"[bold]Final Evaluation:[/bold]\n{result.final_evaluation}",
+            border_style="green" if result.success else "yellow",
+        ))
+        console.print()
+
+    # Show report if available
+    if result.report:
+        console.print(Panel(
+            result.report,
+            title="[bold]Completion Report[/bold]",
+            border_style="dim",
+        ))
+        console.print()
+
+    # Next steps
+    if result.success:
+        console.print(Panel(
+            "[bold green]SUCCESS[/bold green]\n\n"
+            "All tasks from the PRD have been implemented.\n\n"
+            "Next steps:\n"
+            "1. Review the changes in your working directory\n"
+            "2. Run full test suite\n"
+            "3. Create a pull request if satisfied",
+            border_style="green",
+        ))
+    elif not result.is_pro and result.iterations >= 5:
+        console.print(Panel(
+            "[bold yellow]FREE TIER LIMIT REACHED[/bold yellow]\n\n"
+            f"Completed {result.tasks_completed}/{result.tasks_total} tasks in 5 iterations.\n\n"
+            "To continue:\n"
+            "1. Get a pro key for unlimited iterations\n"
+            "2. Or re-run to continue from where you left off",
+            border_style="yellow",
+        ))
+    else:
+        console.print(Panel(
+            "[bold yellow]INCOMPLETE[/bold yellow]\n\n"
+            "The task loop stopped before all tasks were completed.\n\n"
+            "You can re-run to continue from where you left off.",
+            border_style="yellow",
+        ))
+
+
 @app.command("dashboard")
 def dashboard(
     port: int = typer.Option(

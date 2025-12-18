@@ -441,7 +441,8 @@ class TestPlanWriter:
         content = result_path.read_text()
 
         assert "Instructions for Claude Code" in content
-        assert "implement the tasks in order of priority" in content
+        # Instructions now reference Taskmaster for task management
+        assert "Use Taskmaster" in content or "task-master" in content
 
     def test_write_plan_checkboxes_present(
         self, plan_writer: PlanWriter, sample_stage_results: list[StageResult]

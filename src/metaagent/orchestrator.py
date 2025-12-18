@@ -32,6 +32,8 @@ from .claude_impl import ClaudeImplementer, MockClaudeImplementer, Implementatio
 from .config import get_evaluator_name
 from .grok_client import GrokClient, MockGrokClient, GrokClientError
 from .local_manager import LocalRepoManager, MockLocalRepoManager, LocalRepoError
+from .task_manager import TaskManager, Task, TaskManagerError, MockTaskManager
+from .license import verify_pro_key, check_iteration_limit, get_tier_info, FREE_TIER_LIMIT
 from .claude_runner import (
     ClaudeCodeRunner,
     ClaudeCodeResult,
@@ -3956,3 +3958,506 @@ Respond with a JSON object in this exact format:
             logger.warning(f"Failed to filter code context: {e}")
 
         return code_context
+
+    # =========================================================================
+    # Task-Based Autonomous Loop (with custom TaskManager)
+    # =========================================================================
+
+    def run_task_loop(
+        self,
+        prd_path: str,
+        max_iterations: Optional[int] = None,
+        human_approve: bool = True,
+        dry_run: bool = False,
+        free_tier_limit: int = 5,
+        pro_key: Optional[str] = None,
+    ) -> "TaskLoopResult":
+        """Run the task-based autonomous development loop.
+
+        This method uses the custom TaskManager to:
+        1. Parse PRD into structured tasks using Grok
+        2. Iterate through tasks: implement -> test -> fix errors
+        3. Track progress with persistence for resumability
+        4. Generate final report on completion
+
+        Args:
+            prd_path: Path to the PRD file.
+            max_iterations: Maximum loop iterations (None = use config).
+            human_approve: Require approval before each implementation.
+            dry_run: Preview without making changes.
+            free_tier_limit: Max iterations for free tier (default: 5).
+            pro_key: Pro license key to unlock unlimited iterations.
+
+        Returns:
+            TaskLoopResult with completion status and report.
+        """
+        logger.info("Starting task-based autonomous loop")
+        emit(EventType.SESSION_START, {"mode": "task_loop", "prd": prd_path})
+
+        loop_config = self.config.loop
+        max_iters = max_iterations or loop_config.max_iterations
+
+        # Freemium check using license module
+        tier_info = get_tier_info(pro_key)
+        is_pro = tier_info["is_pro"]
+        effective_limit = max_iters if is_pro else min(max_iters, FREE_TIER_LIMIT)
+
+        # Display tier information
+        print(f"\n{'='*80}")
+        print(f"META-AGENT TASK LOOP")
+        print(f"{'='*80}")
+        print(f"License: {tier_info['tier']}")
+        print(f"Iteration Limit: {'Unlimited' if is_pro else f'{FREE_TIER_LIMIT} (upgrade for unlimited)'}")
+        print(f"{'='*80}\n")
+
+        if not is_pro and max_iters > FREE_TIER_LIMIT:
+            logger.warning(
+                f"Free tier limited to {FREE_TIER_LIMIT} iterations. "
+                "Upgrade to Pro for unlimited iterations."
+            )
+
+        # Initialize Grok client for PRD parsing and error diagnosis
+        if self.config.mock_mode:
+            grok_client = MockGrokClient()
+        else:
+            grok_client = GrokClient(
+                model=loop_config.evaluator.grok.model,
+                temperature=loop_config.evaluator.grok.temperature,
+                max_tokens=loop_config.evaluator.grok.max_tokens,
+                timeout=loop_config.evaluator.grok.timeout,
+            )
+
+        # Initialize TaskManager with Grok as query function
+        tasks_file = self.config.repo_path / "meta_agent_tasks.json"
+        try:
+            task_manager = TaskManager(
+                prd_path=prd_path,
+                tasks_file=str(tasks_file),
+                query_fn=lambda prompt: grok_client.chat(
+                    prompt,
+                    system_prompt="You are a senior software architect. Parse PRDs into implementation tasks.",
+                ),
+            )
+        except TaskManagerError as e:
+            return TaskLoopResult(
+                success=False,
+                error=str(e),
+                tasks_total=0,
+                tasks_completed=0,
+            )
+
+        # Initialize local repo manager
+        try:
+            if self.config.mock_mode:
+                local_manager = MockLocalRepoManager(loop_config)
+            else:
+                local_manager = LocalRepoManager(loop_config, repo_path=self.config.repo_path)
+        except LocalRepoError as e:
+            return TaskLoopResult(
+                success=False,
+                error=f"Git initialization failed: {e}",
+                tasks_total=len(task_manager.get_tasks()),
+                tasks_completed=0,
+            )
+
+        # Create branch for work
+        branch_name = None
+        if loop_config.create_branch and not dry_run:
+            try:
+                branch_name = local_manager.create_branch()
+                logger.info(f"Working on branch: {branch_name}")
+            except Exception as e:
+                logger.warning(f"Branch creation failed: {e}")
+                branch_name = local_manager.get_current_branch()
+
+        # Initialize Claude implementer
+        if self.config.mock_mode:
+            claude_impl = MockClaudeImplementer(model=loop_config.claude_model)
+        else:
+            claude_impl = ClaudeImplementer(
+                api_key=self.config.anthropic_api_key,
+                model=loop_config.claude_model,
+            )
+
+        # Main loop
+        iteration_log = []
+        while not task_manager.is_complete():
+            iteration = task_manager.increment_iteration()
+
+            # Check iteration limit
+            if iteration > effective_limit:
+                logger.warning(f"Iteration limit ({effective_limit}) reached")
+                if not is_pro:
+                    logger.info("Upgrade to Pro for unlimited iterations")
+                break
+
+            task = task_manager.get_next_task()
+            if not task:
+                logger.info("No pending tasks remaining")
+                break
+
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Iteration {iteration}/{effective_limit} | Task {task.id}: {task.title}")
+            logger.info(f"{'='*60}\n")
+            emit(EventType.TASK_START, {"task": task.title, "iteration": iteration})
+
+            # Human approval gate with clear task guidance
+            if human_approve and not dry_run:
+                self._display_task_for_implementation(task)
+                response = input("\nProceed with implementation? [y/n/skip]: ").strip().lower()
+                if response == 'n':
+                    logger.info("User cancelled loop")
+                    break
+                elif response == 'skip':
+                    task_manager.set_task_status(task.id, "blocked", "Skipped by user")
+                    continue
+
+            # Mark task in progress
+            task_manager.set_task_status(task.id, "in_progress")
+
+            # Build implementation prompt
+            impl_prompt = self._build_task_impl_prompt(task)
+
+            # Implement with Claude
+            if dry_run:
+                logger.info(f"[DRY RUN] Would implement: {task.title}")
+                task_manager.set_task_status(task.id, "done", "Dry run - skipped")
+                iteration_log.append({
+                    "iteration": iteration,
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "status": "dry_run",
+                })
+                continue
+
+            workspace = WorkspaceManager(self.config.repo_path)
+            impl_result = claude_impl.apply_task_to_repo(
+                task_description=impl_prompt,
+                workspace=workspace,
+                dry_run=False,
+            )
+
+            if not impl_result.success:
+                task_manager.add_task_error(task.id, impl_result.error or "Implementation failed")
+                iteration_log.append({
+                    "iteration": iteration,
+                    "task_id": task.id,
+                    "status": "impl_failed",
+                    "error": impl_result.error,
+                })
+                continue
+
+            # Commit changes
+            if loop_config.commit_per_task:
+                commit_msg = f"[meta-agent] Task {task.id}: {task.title}"
+                commit_result = local_manager.commit_changes(commit_msg)
+                if commit_result.success:
+                    logger.info(f"Committed: {commit_result.commit_hash}")
+
+            # Run tests
+            test_result = local_manager.run_tests()
+
+            if test_result.success:
+                task_manager.set_task_status(task.id, "done", "Tests passed")
+                iteration_log.append({
+                    "iteration": iteration,
+                    "task_id": task.id,
+                    "status": "success",
+                })
+                logger.info(f"Task {task.id} completed successfully!")
+            else:
+                # Grok diagnosis for test failures
+                logger.warning(f"Tests failed for task {task.id}, getting Grok diagnosis...")
+                task_manager.add_task_error(task.id, test_result.error_summary)
+
+                diagnosis_prompt = self._build_grok_diagnosis_prompt(
+                    task={"title": task.title, "description": task.description},
+                    errors=test_result.error_summary,
+                    code_context=self._pack_codebase()[:30000],
+                )
+
+                try:
+                    diagnosis_response = grok_client.chat(
+                        diagnosis_prompt,
+                        system_prompt="Diagnose test failures and provide fix instructions.",
+                    )
+                    fix_data = extract_json_from_response(diagnosis_response)
+                    if fix_data and "fix_prompt" in fix_data:
+                        logger.info(f"Grok diagnosis: {fix_data.get('diagnosis', {}).get('root_cause', 'unknown')}")
+                        # Store fix prompt for next iteration
+                        task_manager.set_task_status(
+                            task.id, "pending",
+                            notes=f"Fix needed: {fix_data['fix_prompt'][:200]}..."
+                        )
+                    else:
+                        task_manager.set_task_status(task.id, "failed", "Grok could not diagnose")
+                except GrokClientError as e:
+                    logger.error(f"Grok diagnosis failed: {e}")
+                    task_manager.set_task_status(task.id, "failed", str(e))
+
+                iteration_log.append({
+                    "iteration": iteration,
+                    "task_id": task.id,
+                    "status": "tests_failed",
+                    "error": test_result.error_summary[:200],
+                })
+
+        # Generate final report
+        progress = task_manager.get_progress()
+        report = self._generate_task_loop_report(
+            task_manager=task_manager,
+            iteration_log=iteration_log,
+            branch_name=branch_name,
+            is_pro=is_pro,
+            prd_path=prd_path,
+            save_to_file=not dry_run,
+        )
+
+        # Final Grok evaluation
+        final_evaluation = None
+        if progress['completed'] > 0 and not self.config.mock_mode:
+            try:
+                prd_content = Path(prd_path).read_text(encoding="utf-8")
+                eval_prompt = self._build_grok_evaluation_prompt(
+                    prd_content=prd_content,
+                    code_context=self._pack_codebase()[:30000],
+                    implementation_summary=task_manager.to_markdown(),
+                )
+                final_evaluation = grok_client.chat(
+                    eval_prompt,
+                    system_prompt="Evaluate PRD implementation completeness.",
+                )
+            except Exception as e:
+                logger.warning(f"Final evaluation failed: {e}")
+
+        emit(EventType.SESSION_END, {
+            "success": task_manager.is_complete(),
+            "progress": progress,
+        })
+
+        return TaskLoopResult(
+            success=task_manager.is_complete(),
+            tasks_total=progress['total'],
+            tasks_completed=progress['completed'],
+            iterations=progress['iterations'],
+            total_fixes=progress['total_fixes'],
+            branch_name=branch_name,
+            report=report,
+            final_evaluation=final_evaluation,
+            is_pro=is_pro,
+        )
+
+    def _build_task_impl_prompt(self, task: Task) -> str:
+        """Build implementation prompt for a task.
+
+        Args:
+            task: Task to implement.
+
+        Returns:
+            Prompt string for Claude.
+        """
+        lines = [
+            f"# Task: {task.title}",
+            "",
+            task.description,
+            "",
+        ]
+
+        if task.subtasks:
+            lines.append("## Subtasks:")
+            for st in task.subtasks:
+                lines.append(f"- {st.title}: {st.description}")
+            lines.append("")
+
+        if task.notes:
+            lines.append(f"## Notes from previous attempt:")
+            lines.append(task.notes)
+            lines.append("")
+
+        if task.error_log:
+            lines.append("## Previous errors to avoid:")
+            for err in task.error_log[-3:]:
+                lines.append(f"- {err}")
+
+        lines.append("\nImplement this task. Make minimal, focused changes.")
+
+        return "\n".join(lines)
+
+    def _display_task_for_implementation(self, task: Task, grok_fix_prompt: Optional[str] = None) -> None:
+        """Display task details clearly for Claude Code implementation.
+
+        This provides clear visual guidance so anyone (human or Claude) knows
+        exactly what needs to be implemented.
+
+        Args:
+            task: Task to display.
+            grok_fix_prompt: Optional fix suggestion from Grok (for retries).
+        """
+        print("\n" + "=" * 80)
+        print("IMPLEMENT THIS TASK (Claude Code)")
+        print("=" * 80)
+        print(f"\nTask ID: {task.id}")
+        print(f"Title: {task.title}")
+        print(f"Priority: {task.priority.upper()}")
+        print(f"\nDescription:")
+        print("-" * 40)
+        print(task.description or "(No description)")
+        print("-" * 40)
+
+        if task.subtasks:
+            print(f"\nSubtasks ({len(task.subtasks)}):")
+            for st in task.subtasks:
+                status_icon = "[x]" if st.status == "done" else "[ ]"
+                print(f"  {status_icon} {st.id}. {st.title}")
+
+        if task.notes:
+            print(f"\nNotes from previous attempt:")
+            print("-" * 40)
+            print(task.notes)
+            print("-" * 40)
+
+        if task.error_log:
+            print(f"\nPrevious errors to avoid ({len(task.error_log)}):")
+            for err in task.error_log[-3:]:
+                print(f"  ! {err[:100]}...")
+
+        if grok_fix_prompt:
+            print("\nGrok Fix Suggestion:")
+            print("-" * 40)
+            print(grok_fix_prompt)
+            print("-" * 40)
+
+        print("\n" + "=" * 80)
+        print("Make your changes now. When finished, type 'y' and press Enter.")
+        print("Type 'skip' to skip this task, or 'n' to stop the loop.")
+        print("=" * 80)
+
+    def _generate_task_loop_report(
+        self,
+        task_manager: TaskManager,
+        iteration_log: list,
+        branch_name: Optional[str],
+        is_pro: bool,
+        prd_path: Optional[str] = None,
+        save_to_file: bool = True,
+    ) -> str:
+        """Generate final report for task loop.
+
+        Args:
+            task_manager: TaskManager with completed tasks.
+            iteration_log: Log of iteration results.
+            branch_name: Git branch used.
+            is_pro: Whether pro license was used.
+            prd_path: Path to PRD file for inclusion in report.
+            save_to_file: Whether to save report to meta-agent-report.md.
+
+        Returns:
+            Markdown report string.
+        """
+        progress = task_manager.get_progress()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            "# Meta-Agent Task Loop Report",
+            f"Generated: {now}",
+            "",
+            "## Summary",
+            f"- **Tasks Completed:** {progress['completed']}/{progress['total']} ({progress['percentage']}%)",
+            f"- **Iterations:** {progress['iterations']}",
+            f"- **Fixes Applied:** {progress['total_fixes']}",
+            f"- **Branch:** {branch_name or 'N/A'}",
+            f"- **License:** {'Pro' if is_pro else 'Free'}",
+            "",
+        ]
+
+        # Include PRD summary if available
+        if prd_path:
+            try:
+                prd_content = Path(prd_path).read_text(encoding='utf-8')
+                prd_preview = prd_content[:500].strip()
+                if len(prd_content) > 500:
+                    prd_preview += "..."
+                lines.extend([
+                    "## PRD Summary",
+                    "```",
+                    prd_preview,
+                    "```",
+                    "",
+                ])
+            except Exception:
+                pass
+
+        # Task status
+        lines.append("## Task Status")
+        for task in task_manager.get_tasks():
+            status_icon = {"done": "[x]", "pending": "[ ]", "failed": "[!]", "blocked": "[B]"}.get(task.status, "[ ]")
+            lines.append(f"- {status_icon} **{task.id}. {task.title}** - {task.status}")
+            if task.notes:
+                lines.append(f"  - Notes: {task.notes[:100]}...")
+
+        # Iteration log
+        if iteration_log:
+            lines.extend([
+                "",
+                "## Iteration Log",
+            ])
+            for entry in iteration_log[-10:]:  # Last 10 entries
+                lines.append(f"- Iteration {entry['iteration']}: Task {entry.get('task_id', 'N/A')} - {entry.get('status', 'unknown')}")
+
+        # Git diff summary
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat", "HEAD~1"],
+                capture_output=True,
+                text=True,
+                cwd=str(self.config.repo_path),
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines.extend([
+                    "",
+                    "## Changes Made (git diff --stat)",
+                    "```",
+                    result.stdout.strip()[-2000:],  # Limit to last 2000 chars
+                    "```",
+                ])
+        except Exception:
+            pass
+
+        # Upgrade prompt for free tier
+        if not is_pro:
+            lines.extend([
+                "",
+                "---",
+                "*Free tier: Limited to 5 iterations. Upgrade to Pro for unlimited iterations.*",
+                "*Get your pro key at: https://yoursite.gumroad.com/l/meta-agent-pro*",
+            ])
+
+        report = "\n".join(lines)
+
+        # Save report to file
+        if save_to_file:
+            report_path = self.config.repo_path / "meta-agent-report.md"
+            try:
+                report_path.write_text(report, encoding='utf-8')
+                logger.info(f"Report saved to: {report_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save report: {e}")
+
+        return report
+
+
+@dataclass
+class TaskLoopResult:
+    """Result from the task-based autonomous loop."""
+
+    success: bool
+    tasks_total: int = 0
+    tasks_completed: int = 0
+    iterations: int = 0
+    total_fixes: int = 0
+    branch_name: Optional[str] = None
+    report: str = ""
+    final_evaluation: Optional[str] = None
+    is_pro: bool = False
+    error: Optional[str] = None
