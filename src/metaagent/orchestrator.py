@@ -28,6 +28,7 @@ from .analysis import (
     create_analysis_engine,
     extract_json_from_response,
 )
+from .claude_impl import ClaudeImplementer, MockClaudeImplementer, ImplementationResult
 from .claude_runner import (
     ClaudeCodeRunner,
     ClaudeCodeResult,
@@ -38,6 +39,7 @@ from .claude_runner import (
 )
 from .codebase_digest import CodebaseDigestRunner, DigestResult
 from .config import Config
+from .workspace_manager import WorkspaceManager, generate_branch_name, TestResult
 from .ollama_engine import OllamaEngine, TriageOutput, check_ollama_status
 from .plan_writer import PlanWriter, StageResult
 from .prompts import Prompt, PromptLibrary
@@ -51,6 +53,31 @@ from .strategies import (
     create_strategy,
 )
 from .tokens import estimate_tokens, format_token_count
+
+# Import dashboard events (optional - only if dashboard module exists)
+try:
+    from .dashboard.events import EventType, emit, get_emitter
+    DASHBOARD_AVAILABLE = True
+except ImportError:
+    DASHBOARD_AVAILABLE = False
+    # Stub for when dashboard isn't available
+    def emit(event_type, data=None):
+        pass
+    class EventType:
+        SESSION_START = "session_start"
+        SESSION_END = "session_end"
+        ITERATION_START = "iteration_start"
+        LAYER_UPDATE = "layer_update"
+        TASK_LIST = "task_list"
+        TASK_START = "task_start"
+        TASK_COMPLETE = "task_complete"
+        LOG = "log"
+        ERROR = "error"
+        OLLAMA_START = "ollama_start"
+        OLLAMA_COMPLETE = "ollama_complete"
+        PERPLEXITY_START = "perplexity_start"
+        PERPLEXITY_COMPLETE = "perplexity_complete"
+        FILE_MODIFIED = "file_modified"
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +134,19 @@ class StageTriageResult:
 
 
 @dataclass
+class LayerStatus:
+    """Status of development layers in iterative refinement."""
+
+    current_layer: int = 1
+    layer_name: str = "scaffold"
+    layer_progress: str = ""
+    scaffold_complete: bool = False
+    core_complete: bool = False
+    integration_complete: bool = False
+    polish_complete: bool = False
+
+
+@dataclass
 class IterationResult:
     """Result from a single iteration of the refinement loop."""
 
@@ -116,6 +156,7 @@ class IterationResult:
     committed: bool
     commit_hash: Optional[str] = None
     stage_results: list[StageResult] = field(default_factory=list)
+    layer_status: Optional[LayerStatus] = None
 
 
 @dataclass
@@ -127,6 +168,29 @@ class PlannedCall:
     profile: str
     rendered_prompt: str
     estimated_tokens: int
+
+
+@dataclass
+class AutonomousLoopResult:
+    """Result from the autonomous development loop.
+
+    This dataclass captures the complete state of an autonomous loop run,
+    including iterations, tasks, tests, and final evaluation.
+    """
+
+    success: bool
+    iterations_completed: int
+    max_iterations: int
+    tasks_completed: int = 0
+    tests_passed: int = 0
+    fixes_applied: int = 0
+    tokens_used: int = 0
+    branch_name: Optional[str] = None
+    commits_made: int = 0
+    final_evaluation: Optional[str] = None
+    prd_aligned: bool = False
+    error: Optional[str] = None
+    iteration_details: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1896,6 +1960,347 @@ class Orchestrator:
             implementation_report=implementation_report,
         )
 
+    def refine_with_feature_focus_iterative(
+        self,
+        feature_request: str,
+        max_iterations: int = 10,
+    ) -> RefinementResult:
+        """Run iterative feature-focused refinement until the feature is complete.
+
+        This mode runs the feature-focused refinement in a loop:
+
+        1. Pack codebase with Repomix
+        2. Ollama selects relevant files (local, free)
+        3. Perplexity analyzes and generates tasks
+        4. Check if "done" (feature already implemented)
+        5. If not done, write tasks file
+        6. Claude Code implements the tasks (if auto_implement enabled)
+        7. Commit changes
+        8. Repeat until done or max_iterations reached
+
+        Args:
+            feature_request: The feature to implement (e.g., "add analytics tracking").
+            max_iterations: Maximum iterations before stopping.
+
+        Returns:
+            RefinementResult with the outcome.
+        """
+        if not self.ollama_engine:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus_iterative",
+                stages_completed=0,
+                stages_failed=0,
+                error="Ollama not available. Install from https://ollama.com and run: ollama pull llama3.2:3b",
+            )
+
+        logger.info("Starting iterative feature-focused refinement")
+        logger.info(f"Target repo: {self.config.repo_path}")
+        logger.info(f"Feature request: {feature_request}")
+        logger.info(f"Max iterations: {max_iterations}")
+
+        # Emit session start event for dashboard
+        emit(EventType.SESSION_START, {
+            "session_id": f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "feature_request": feature_request,
+            "max_iterations": max_iterations,
+            "repo_path": str(self.config.repo_path),
+        })
+
+        # Load PRD once (doesn't change between iterations)
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus_iterative",
+                stages_completed=0,
+                stages_failed=0,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Get the feature expansion prompt once
+        feature_prompt = self.prompt_library.get_prompt("meta_feature_expansion")
+        if not feature_prompt:
+            return RefinementResult(
+                success=False,
+                profile_name="feature_focus_iterative",
+                stages_completed=0,
+                stages_failed=0,
+                error="Feature expansion prompt (meta_feature_expansion) not found",
+            )
+
+        # Build prompt index once (doesn't change)
+        prompt_index = self.triage_engine.build_prompt_index()
+
+        all_stage_results: list[StageResult] = []
+        iterations: list[IterationResult] = []
+        stages_completed = 0
+        stages_failed = 0
+
+        for iteration in range(1, max_iterations + 1):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"=== Iteration {iteration}/{max_iterations} ===")
+            logger.info(f"{'='*60}\n")
+
+            # Emit iteration start event
+            emit(EventType.ITERATION_START, {"iteration": iteration, "max_iterations": max_iterations})
+
+            # Step 1: Pack codebase (fresh each iteration to see changes)
+            logger.info("Step 1: Packing codebase...")
+            emit(EventType.LOG, {"message": "Packing codebase...", "level": "info"})
+            full_code_context = self._pack_codebase()
+
+            if not full_code_context:
+                logger.error("Failed to pack codebase")
+                stages_failed += 1
+                continue
+
+            # Step 2: Ollama selects relevant files
+            logger.info("Step 2: Ollama selecting relevant files (local, free)...")
+            emit(EventType.OLLAMA_START, {"message": "Selecting relevant files..."})
+            relevant_files = self.ollama_engine.select_files(
+                feature_request=feature_request,
+                code_context=full_code_context,
+                prd_content=prd_content,
+            )
+
+            if relevant_files:
+                logger.info(f"Selected {len(relevant_files)} files: {relevant_files[:5]}...")
+                emit(EventType.OLLAMA_COMPLETE, {"file_count": len(relevant_files), "files": relevant_files[:10]})
+                reduced_context = extract_files(full_code_context, relevant_files)
+                tokens_saved = estimate_tokens(full_code_context) - estimate_tokens(reduced_context)
+                logger.info(f"Reduced context by {format_token_count(tokens_saved)} tokens")
+                emit(EventType.LOG, {"message": f"Reduced context by {format_token_count(tokens_saved)} tokens", "level": "info"})
+            else:
+                logger.info("Using full codebase context")
+                emit(EventType.OLLAMA_COMPLETE, {"file_count": 0, "files": []})
+                reduced_context = full_code_context
+
+            # Step 3: Perplexity analyzes
+            logger.info("Step 3: Perplexity analyzing feature...")
+            emit(EventType.PERPLEXITY_START, {"message": "Analyzing feature and generating tasks..."})
+            rendered_prompt = feature_prompt.render(
+                feature_request=feature_request,
+                code_context=reduced_context,
+                prd=prd_content,
+                available_prompts=prompt_index,
+            )
+
+            analysis_result = self.analysis_engine.analyze_raw(
+                rendered_prompt,
+                system_message=(
+                    "You are a senior software architect. Analyze the codebase and feature request. "
+                    "Respond with valid JSON following the exact schema specified in the prompt. "
+                    "IMPORTANT: If the feature is already implemented, set done=true."
+                ),
+            )
+
+            if not analysis_result.success:
+                logger.error(f"Analysis failed: {analysis_result.error}")
+                stages_failed += 1
+                continue
+
+            # Step 4: Parse response and check if done
+            emit(EventType.PERPLEXITY_COMPLETE, {"message": "Analysis complete"})
+            feature_result = self._parse_feature_response(analysis_result)
+            if not feature_result:
+                logger.error("Failed to parse feature response")
+                emit(EventType.ERROR, {"message": "Failed to parse feature response"})
+                stages_failed += 1
+                continue
+
+            is_done = feature_result.get("done", False)
+            done_summary = feature_result.get("done_summary", "")
+
+            # Extract layer status
+            layer_status = feature_result.get("layer_status", {})
+            current_layer = layer_status.get("current_layer", 1)
+            layer_name = layer_status.get("layer_name", "scaffold")
+            layer_progress = layer_status.get("layer_progress", "")
+            layers_complete = layer_status.get("layers_complete", {})
+
+            # Emit layer update event
+            emit(EventType.LAYER_UPDATE, {
+                "current_layer": current_layer,
+                "layer_name": layer_name,
+                "layer_progress": layer_progress,
+                "layers_complete": layers_complete,
+            })
+
+            # Create LayerStatus object
+            current_layer_status = LayerStatus(
+                current_layer=current_layer,
+                layer_name=layer_name,
+                layer_progress=layer_progress,
+                scaffold_complete=layers_complete.get("scaffold", False),
+                core_complete=layers_complete.get("core", False),
+                integration_complete=layers_complete.get("integration", False),
+                polish_complete=layers_complete.get("polish", False),
+            )
+
+            # Log layer progress
+            logger.info(f"Layer: {current_layer}/4 ({layer_name.upper()})")
+            if layer_progress:
+                progress_preview = layer_progress[:80] + "..." if len(layer_progress) > 80 else layer_progress
+                logger.info(f"Progress: {progress_preview}")
+
+            # Show layer completion status
+            def layer_icon(done: bool) -> str:
+                return "[+]" if done else "[ ]"
+
+            logger.info(
+                f"  {layer_icon(current_layer_status.scaffold_complete)} Scaffold  "
+                f"{layer_icon(current_layer_status.core_complete)} Core  "
+                f"{layer_icon(current_layer_status.integration_complete)} Integration  "
+                f"{layer_icon(current_layer_status.polish_complete)} Polish"
+            )
+
+            if is_done:
+                logger.info("="*60)
+                logger.info("FEATURE COMPLETE! All layers done.")
+                logger.info(f"Summary: {done_summary}")
+                logger.info("="*60)
+
+                # Record final iteration with completed layer status
+                iterations.append(
+                    IterationResult(
+                        iteration=iteration,
+                        prompts_run=[],
+                        changes_made=False,
+                        committed=False,
+                        stage_results=[],
+                        layer_status=current_layer_status,
+                    )
+                )
+                break
+
+            # Step 5: Build stage results from tasks
+            tasks = feature_result.get("implementation_tasks", [])
+            logger.info(f"Generated {len(tasks)} tasks for layer: {layer_name}")
+
+            # Emit task list event
+            emit(EventType.TASK_LIST, {
+                "tasks": [{"title": t.get("title", ""), "priority": t.get("priority", "medium")} for t in tasks],
+                "count": len(tasks),
+                "layer": layer_name,
+            })
+
+            stage_result = StageResult(
+                stage_id=f"feature_iteration_{iteration}_layer_{current_layer}",
+                stage_name=f"Layer {current_layer} ({layer_name.capitalize()}): {feature_result.get('feature_analysis', {}).get('core_functionality', feature_request)[:30]}",
+                summary=self._format_feature_summary(feature_result),
+                recommendations=self._extract_recommendations(feature_result),
+                tasks=tasks,
+            )
+            all_stage_results.append(stage_result)
+            stages_completed += 1
+
+            # Step 6: Write tasks file and implement
+            if tasks:
+                # Write tasks to file for Claude Code
+                implementation_report = self.implementation_executor.analyze_and_report([stage_result])
+                logger.info(f"Wrote {len(implementation_report.tasks)} tasks to .meta-agent-tasks.md")
+
+                # Execute implementation if auto_implement is enabled
+                changes_made = False
+                if self.config.auto_implement:
+                    logger.info("Step 6: Claude Code implementing changes...")
+                    changes_made = self.implementation_executor.execute([stage_result])
+                    if changes_made:
+                        logger.info("Implementation completed")
+                    else:
+                        logger.warning("No changes made during implementation")
+                else:
+                    logger.info("Step 6: Tasks written. Run Claude Code to implement.")
+                    logger.info("       Use --auto-implement to run Claude Code automatically.")
+                    # In non-auto mode, we can't loop - just return after first iteration
+                    break
+
+                # Step 7: Commit changes
+                commit_hash = None
+                if changes_made and self.config.auto_commit:
+                    logger.info("Step 7: Committing changes...")
+                    commit_hash = self.implementation_executor.commit_changes(
+                        f"feat: iteration {iteration} - {feature_request[:50]}",
+                        prompt_ids=["feature_focus"],
+                    )
+                    if commit_hash:
+                        logger.info(f"Committed: {commit_hash}")
+
+                iterations.append(
+                    IterationResult(
+                        iteration=iteration,
+                        prompts_run=["feature_focus"],
+                        changes_made=changes_made,
+                        committed=commit_hash is not None,
+                        commit_hash=commit_hash,
+                        stage_results=[stage_result],
+                        layer_status=current_layer_status,
+                    )
+                )
+
+                if not changes_made:
+                    logger.warning("No changes made - stopping iteration")
+                    break
+            else:
+                logger.warning("No tasks generated - stopping iteration")
+                iterations.append(
+                    IterationResult(
+                        iteration=iteration,
+                        prompts_run=["feature_focus"],
+                        changes_made=False,
+                        committed=False,
+                        stage_results=[stage_result],
+                        layer_status=current_layer_status,
+                    )
+                )
+                break
+
+        # Write final plan
+        plan_path = None
+        if all_stage_results:
+            logger.info("Writing final improvement plan...")
+            plan_path = self.plan_writer.write_plan(
+                prd_content=prd_content,
+                profile_name=f"Feature Focus (Iterative): {feature_request[:40]}",
+                stage_results=all_stage_results,
+            )
+            logger.info(f"Plan written to: {plan_path}")
+
+        # Generate final implementation report
+        implementation_report = None
+        if all_stage_results:
+            implementation_report = self.implementation_executor.analyze_and_report(
+                all_stage_results
+            )
+            logger.info(f"Final report: {len(implementation_report.tasks)} total tasks")
+
+        # Determine success
+        feature_done = any(
+            it.iteration > 0 and not it.changes_made and it.prompts_run == []
+            for it in iterations
+        )
+
+        # Emit session end event
+        emit(EventType.SESSION_END, {
+            "success": feature_done or (stages_failed == 0 and stages_completed > 0),
+            "stages_completed": stages_completed,
+            "stages_failed": stages_failed,
+            "iterations": len(iterations),
+        })
+
+        return RefinementResult(
+            success=feature_done or (stages_failed == 0 and stages_completed > 0),
+            profile_name="feature_focus_iterative",
+            stages_completed=stages_completed,
+            stages_failed=stages_failed,
+            plan_path=plan_path,
+            stage_results=all_stage_results,
+            iterations=iterations,
+            partial_success=stages_failed > 0 and stages_completed > 0,
+            implementation_report=implementation_report,
+        )
+
     def _parse_feature_response(self, analysis_result: AnalysisResult) -> Optional[dict]:
         """Parse the feature expansion response from Perplexity.
 
@@ -2478,3 +2883,527 @@ class Orchestrator:
             return "[No codebase context available - both codebase-digest and Repomix failed]"
 
         return "\n".join(sections)
+
+    def run_autonomous_loop(
+        self,
+        feature_request: str,
+    ) -> AutonomousLoopResult:
+        """Run the autonomous development loop.
+
+        This method implements the full autonomous cycle:
+        1. Analyze codebase with Ollama + Perplexity
+        2. Generate task plan
+        3. Implement each task with Claude API
+        4. Run tests
+        5. On failure: get Perplexity diagnosis -> Claude fix
+        6. Commit changes
+        7. Repeat until complete or max iterations
+
+        Args:
+            feature_request: Description of the feature to implement.
+
+        Returns:
+            AutonomousLoopResult with success status and details.
+        """
+        logger.info("Starting autonomous development loop")
+        emit(EventType.SESSION_START, {"mode": "autonomous_loop", "feature": feature_request})
+
+        loop_config = self.config.loop
+        max_iterations = loop_config.max_iterations
+
+        # Initialize Claude implementer
+        if self.config.mock_mode:
+            claude_impl = MockClaudeImplementer(
+                model=loop_config.claude_model,
+            )
+        else:
+            claude_impl = ClaudeImplementer(
+                api_key=self.config.anthropic_api_key,
+                model=loop_config.claude_model,
+            )
+
+        # Initialize workspace manager
+        workspace = WorkspaceManager(self.config.repo_path)
+
+        # Create branch if configured
+        branch_name = None
+        if loop_config.create_branch:
+            branch_name = generate_branch_name(loop_config.branch_pattern)
+            try:
+                workspace.create_branch(branch_name)
+                logger.info(f"Created branch: {branch_name}")
+            except Exception as e:
+                logger.warning(f"Failed to create branch: {e}")
+                branch_name = None
+
+        # Load PRD
+        prd_content = self._load_prd()
+        if prd_content is None:
+            return AutonomousLoopResult(
+                success=False,
+                iterations_completed=0,
+                max_iterations=max_iterations,
+                error=f"PRD file not found: {self.config.prd_path}",
+            )
+
+        # Track loop state
+        iterations_completed = 0
+        tasks_completed = 0
+        tests_passed = 0
+        fixes_applied = 0
+        tokens_used = 0
+        commits_made = 0
+        consecutive_failures = 0
+        iteration_details = []
+
+        try:
+            while iterations_completed < max_iterations:
+                iterations_completed += 1
+                logger.info(f"=== Autonomous Loop Iteration {iterations_completed}/{max_iterations} ===")
+                emit(EventType.ITERATION_START, {"iteration": iterations_completed, "max": max_iterations})
+
+                # Step 1: Pack codebase and analyze
+                code_context = self._pack_codebase()
+
+                # Step 2: Get analysis and task plan using feature focus
+                analysis_result = self._run_feature_analysis(
+                    feature_request=feature_request,
+                    prd_content=prd_content,
+                    code_context=code_context,
+                )
+
+                if not analysis_result.success:
+                    logger.error(f"Analysis failed: {analysis_result.error}")
+                    consecutive_failures += 1
+                    if consecutive_failures >= loop_config.max_consecutive_failures:
+                        break
+                    continue
+
+                # Extract tasks from analysis
+                tasks = self._extract_tasks_from_analysis(analysis_result)
+                if not tasks:
+                    logger.info("No more tasks to implement - feature complete!")
+                    break
+
+                # Step 3: Implement each task
+                for task in tasks:
+                    logger.info(f"Implementing task: {task.get('title', 'Unknown')}")
+                    emit(EventType.TASK_START, {"task": task.get("title", "Unknown")})
+
+                    # Get fresh repomix for implementation
+                    repomix_result = self.repomix_runner.pack(self.config.repo_path)
+                    repomix_xml = repomix_result.content if repomix_result.success else None
+
+                    # Implement with Claude
+                    impl_result = claude_impl.apply_task_to_repo(
+                        task_description=task.get("description", task.get("title", "")),
+                        workspace=workspace,
+                        repomix_xml=repomix_xml,
+                        dry_run=loop_config.dry_run,
+                    )
+
+                    tokens_used += impl_result.tokens_used
+
+                    if not impl_result.success:
+                        logger.error(f"Implementation failed: {impl_result.error}")
+                        consecutive_failures += 1
+                        continue
+
+                    tasks_completed += 1
+                    consecutive_failures = 0
+
+                    # Step 4: Run tests
+                    test_result = workspace.run_tests(loop_config.test_command)
+
+                    if test_result.passed:
+                        tests_passed += 1
+                        logger.info("Tests passed!")
+
+                        # Step 5: Commit if configured
+                        if loop_config.commit_per_task and not loop_config.dry_run:
+                            commit_result = workspace.commit(impl_result.commit_message)
+                            if commit_result.success:
+                                commits_made += 1
+                                logger.info(f"Committed: {commit_result.commit_hash}")
+                    else:
+                        # Step 6: Get Perplexity diagnosis and fix
+                        logger.info("Tests failed, getting diagnosis...")
+                        fix_result = self._diagnose_and_fix(
+                            task=task,
+                            test_result=test_result,
+                            workspace=workspace,
+                            claude_impl=claude_impl,
+                            prd_content=prd_content,
+                        )
+
+                        if fix_result.get("success"):
+                            fixes_applied += 1
+                            tokens_used += fix_result.get("tokens_used", 0)
+
+                            # Re-run tests after fix
+                            retest_result = workspace.run_tests(loop_config.test_command)
+                            if retest_result.passed:
+                                tests_passed += 1
+                                if loop_config.commit_per_task and not loop_config.dry_run:
+                                    commit_result = workspace.commit(
+                                        f"fix: {impl_result.commit_message}"
+                                    )
+                                    if commit_result.success:
+                                        commits_made += 1
+                            else:
+                                consecutive_failures += 1
+                        else:
+                            consecutive_failures += 1
+
+                    emit(EventType.TASK_COMPLETE, {
+                        "task": task.get("title", "Unknown"),
+                        "success": test_result.passed,
+                    })
+
+                    # Store iteration details
+                    iteration_details.append({
+                        "iteration": iterations_completed,
+                        "task": task.get("title", "Unknown"),
+                        "tests_passed": test_result.passed,
+                        "fixes_applied": 1 if not test_result.passed and fixes_applied > 0 else 0,
+                        "success": test_result.passed,
+                    })
+
+                    # Check for max consecutive failures
+                    if consecutive_failures >= loop_config.max_consecutive_failures:
+                        logger.error(f"Max consecutive failures reached ({consecutive_failures})")
+                        break
+
+                # Human approval gate
+                if loop_config.human_approve and not loop_config.dry_run:
+                    try:
+                        response = input("\nContinue to next iteration? (Enter=yes, 'q'=quit): ")
+                        if response.lower() in ("q", "quit", "n", "no"):
+                            logger.info("User requested stop")
+                            break
+                    except EOFError:
+                        pass  # Non-interactive mode
+
+                if consecutive_failures >= loop_config.max_consecutive_failures:
+                    break
+
+        except KeyboardInterrupt:
+            logger.info("Loop interrupted by user")
+        except Exception as e:
+            logger.error(f"Loop error: {e}")
+            return AutonomousLoopResult(
+                success=False,
+                iterations_completed=iterations_completed,
+                max_iterations=max_iterations,
+                tasks_completed=tasks_completed,
+                tests_passed=tests_passed,
+                fixes_applied=fixes_applied,
+                tokens_used=tokens_used,
+                branch_name=branch_name,
+                commits_made=commits_made,
+                error=str(e),
+                iteration_details=iteration_details,
+            )
+
+        # Final PRD evaluation
+        final_evaluation = None
+        prd_aligned = False
+        if tasks_completed > 0:
+            eval_result = self._run_prd_evaluation(prd_content)
+            if eval_result:
+                final_evaluation = eval_result.get("overall_assessment", "")
+                prd_aligned = eval_result.get("approved", False)
+
+        emit(EventType.SESSION_END, {
+            "success": tasks_completed > 0 and consecutive_failures < loop_config.max_consecutive_failures,
+            "tasks_completed": tasks_completed,
+        })
+
+        return AutonomousLoopResult(
+            success=tasks_completed > 0 and consecutive_failures < loop_config.max_consecutive_failures,
+            iterations_completed=iterations_completed,
+            max_iterations=max_iterations,
+            tasks_completed=tasks_completed,
+            tests_passed=tests_passed,
+            fixes_applied=fixes_applied,
+            tokens_used=tokens_used,
+            branch_name=branch_name,
+            commits_made=commits_made,
+            final_evaluation=final_evaluation,
+            prd_aligned=prd_aligned,
+            iteration_details=iteration_details,
+        )
+
+    def _run_feature_analysis(
+        self,
+        feature_request: str,
+        prd_content: str,
+        code_context: str,
+    ) -> AnalysisResult:
+        """Run feature-focused analysis using Ollama + Perplexity.
+
+        Args:
+            feature_request: The feature to analyze for.
+            prd_content: PRD content.
+            code_context: Packed codebase content.
+
+        Returns:
+            AnalysisResult with tasks.
+        """
+        # Use the existing feature focus mechanism
+        try:
+            # First, use Ollama to select relevant files
+            ollama_result = self.ollama_engine.feature_focused_triage(
+                prd_content=prd_content,
+                code_context=code_context,
+                feature_request=feature_request,
+            )
+
+            if not ollama_result.success:
+                return AnalysisResult(
+                    success=False,
+                    error=ollama_result.error or "Ollama triage failed",
+                )
+
+            # Filter code context to relevant files
+            filtered_context = self._filter_code_context(
+                code_context, ollama_result.selected_files or []
+            )
+
+            # Get meta_feature_expansion prompt
+            prompt = self.prompt_library.get_prompt("meta_feature_expansion")
+            if not prompt:
+                return AnalysisResult(
+                    success=False,
+                    error="meta_feature_expansion prompt not found",
+                )
+
+            # Build the analysis prompt
+            rendered_prompt = f"""
+## Feature Request
+{feature_request}
+
+## PRD Context
+{prd_content}
+
+## Relevant Files
+{filtered_context}
+
+{prompt.template}
+"""
+
+            # Run Perplexity analysis
+            result = self.engine.analyze(rendered_prompt)
+            return result
+
+        except Exception as e:
+            logger.error(f"Feature analysis failed: {e}")
+            return AnalysisResult(
+                success=False,
+                error=str(e),
+            )
+
+    def _extract_tasks_from_analysis(self, analysis_result: AnalysisResult) -> list[dict]:
+        """Extract actionable tasks from analysis result.
+
+        Args:
+            analysis_result: Result from Perplexity analysis.
+
+        Returns:
+            List of task dictionaries.
+        """
+        tasks = []
+
+        # Try to parse JSON from response
+        if analysis_result.raw_response:
+            json_data = extract_json_from_response(analysis_result.raw_response)
+            if json_data:
+                # Look for tasks in various formats
+                if isinstance(json_data, dict):
+                    if "tasks" in json_data:
+                        tasks = json_data["tasks"]
+                    elif "implementation_tasks" in json_data:
+                        tasks = json_data["implementation_tasks"]
+                    elif "recommendations" in json_data:
+                        # Convert recommendations to tasks
+                        for rec in json_data.get("recommendations", []):
+                            if isinstance(rec, dict):
+                                tasks.append({
+                                    "title": rec.get("title", rec.get("recommendation", "")),
+                                    "description": rec.get("description", rec.get("details", "")),
+                                    "priority": rec.get("priority", "medium"),
+                                })
+                            elif isinstance(rec, str):
+                                tasks.append({"title": rec, "description": rec})
+
+        # Fallback: try to extract from summary
+        if not tasks and analysis_result.summary:
+            # Simple extraction from numbered lists
+            import re
+            lines = analysis_result.summary.split("\n")
+            for line in lines:
+                match = re.match(r"^\d+\.\s*(.+)$", line.strip())
+                if match:
+                    tasks.append({
+                        "title": match.group(1),
+                        "description": match.group(1),
+                    })
+
+        return tasks
+
+    def _diagnose_and_fix(
+        self,
+        task: dict,
+        test_result: TestResult,
+        workspace: WorkspaceManager,
+        claude_impl: ClaudeImplementer,
+        prd_content: str,
+    ) -> dict:
+        """Use Perplexity to diagnose error and Claude to fix.
+
+        Args:
+            task: The task that failed.
+            test_result: Test failure details.
+            workspace: The workspace manager.
+            claude_impl: Claude implementer instance.
+            prd_content: PRD content for context.
+
+        Returns:
+            Dictionary with success status and details.
+        """
+        try:
+            # Get fresh repomix
+            repomix_result = self.repomix_runner.pack(self.config.repo_path)
+            repomix_xml = repomix_result.content if repomix_result.success else ""
+
+            # Get error_fix prompt
+            error_fix_prompt = self.prompt_library.get_prompt("meta_error_fix")
+            if not error_fix_prompt:
+                logger.warning("meta_error_fix prompt not found, using default")
+                error_fix_template = "Diagnose this error and provide a fix."
+            else:
+                error_fix_template = error_fix_prompt.template
+
+            # Build diagnosis prompt
+            diagnosis_prompt = f"""
+{error_fix_template}
+
+## Current Codebase
+{repomix_xml[:50000] if len(repomix_xml) > 50000 else repomix_xml}
+
+## Failing Task
+{task.get('title', 'Unknown')}: {task.get('description', '')}
+
+## Test Errors
+{test_result.error_summary}
+"""
+
+            # Get diagnosis from Perplexity
+            emit(EventType.PERPLEXITY_START, {"purpose": "error_diagnosis"})
+            diagnosis_result = self.engine.analyze(diagnosis_prompt)
+            emit(EventType.PERPLEXITY_COMPLETE, {"success": diagnosis_result.success})
+
+            if not diagnosis_result.success:
+                return {"success": False, "error": diagnosis_result.error}
+
+            # Extract fix prompt from diagnosis
+            fix_prompt = diagnosis_result.summary
+            json_data = extract_json_from_response(diagnosis_result.raw_response)
+            if json_data and isinstance(json_data, dict):
+                fix_prompt = json_data.get("fix_prompt", fix_prompt)
+
+            # Apply fix with Claude
+            fix_result = claude_impl.apply_fix_prompt(
+                fix_prompt=fix_prompt,
+                workspace=workspace,
+                repomix_xml=repomix_xml,
+                dry_run=self.config.loop.dry_run,
+            )
+
+            return {
+                "success": fix_result.success,
+                "tokens_used": 0,  # Would need to track from both calls
+                "error": fix_result.error,
+            }
+
+        except Exception as e:
+            logger.error(f"Diagnosis and fix failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _run_prd_evaluation(self, prd_content: str) -> Optional[dict]:
+        """Run final PRD alignment evaluation.
+
+        Args:
+            prd_content: Original PRD content.
+
+        Returns:
+            Evaluation result dictionary or None.
+        """
+        try:
+            # Get fresh repomix
+            repomix_result = self.repomix_runner.pack(self.config.repo_path)
+            repomix_xml = repomix_result.content if repomix_result.success else ""
+
+            # Get evaluation prompt
+            eval_prompt = self.prompt_library.get_prompt("meta_prd_evaluation")
+            if not eval_prompt:
+                logger.warning("meta_prd_evaluation prompt not found")
+                return None
+
+            # Build evaluation request
+            evaluation_request = f"""
+{eval_prompt.template}
+
+## Product Requirements Document
+{prd_content}
+
+## Current Codebase
+{repomix_xml[:100000] if len(repomix_xml) > 100000 else repomix_xml}
+"""
+
+            # Run evaluation
+            result = self.engine.analyze(evaluation_request)
+            if not result.success:
+                return None
+
+            # Parse response
+            json_data = extract_json_from_response(result.raw_response)
+            if json_data and isinstance(json_data, dict):
+                return json_data
+
+            return {"overall_assessment": result.summary, "approved": True}
+
+        except Exception as e:
+            logger.error(f"PRD evaluation failed: {e}")
+            return None
+
+    def _filter_code_context(self, code_context: str, selected_files: list[str]) -> str:
+        """Filter code context to only include selected files.
+
+        Args:
+            code_context: Full code context.
+            selected_files: List of file paths to include.
+
+        Returns:
+            Filtered code context.
+        """
+        if not selected_files:
+            return code_context
+
+        # Try to extract only the relevant files from repomix output
+        try:
+            files = extract_files(code_context)
+            filtered_files = []
+            for file_path, content in files.items():
+                # Check if any selected file matches
+                for selected in selected_files:
+                    if selected in file_path or file_path in selected:
+                        filtered_files.append(f"## {file_path}\n```\n{content}\n```")
+                        break
+
+            if filtered_files:
+                return "\n\n".join(filtered_files)
+        except Exception as e:
+            logger.warning(f"Failed to filter code context: {e}")
+
+        return code_context

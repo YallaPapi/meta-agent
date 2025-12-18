@@ -1,0 +1,46 @@
+# Autonomous Loop Configuration for Meta-Agent
+# These settings control the autonomous development loop mode (--loop)
+
+loop:
+  # Master switch for loop mode (can be overridden by CLI --loop flag)
+  enabled: false
+
+  # Maximum number of iterations before stopping
+  # Each iteration: plan -> implement -> test -> fix (if needed)
+  max_iterations: 10
+
+  # Require human approval after each iteration
+  # If true, prompts user to continue or abort after each task
+  human_approve: true
+
+  # Dry-run mode: preview changes without applying
+  # Useful for testing the loop logic without modifying files
+  dry_run: false
+
+  # Test command to run after each implementation
+  # Common options: "pytest -q", "npm test", "make test"
+  test_command: "pytest -q"
+
+  # Claude model to use for implementation
+  # Options: claude-sonnet-4-20250514, claude-opus-4-20250514
+  claude_model: "claude-sonnet-4-20250514"
+
+  # Commit after each task completion
+  # If false, only commits at the end of the loop
+  commit_per_task: true
+
+  # Branch naming pattern for loop work
+  # {timestamp} will be replaced with ISO timestamp
+  branch_pattern: "meta-agent-loop/{timestamp}"
+
+  # Whether to create a new branch for loop work
+  # If false, works on current branch
+  create_branch: true
+
+  # Token budget per iteration (for cost control)
+  # Set to 0 for unlimited
+  token_budget_per_iteration: 50000
+
+  # Maximum consecutive failures before aborting
+  # Prevents infinite error->fix->error loops
+  max_consecutive_failures: 3

@@ -152,11 +152,46 @@ def refine(
         help="Custom focus for analysis (used with --smart). "
              "E.g., 'electron frontend with gamified UX' or 'API performance and security'.",
     ),
+    loop: bool = typer.Option(
+        False,
+        "--loop",
+        "-l",
+        help="Run in iterative loop mode (used with --smart --focus). "
+             "Continuously analyzes, implements, and re-analyzes until feature is complete.",
+    ),
+    autodev: bool = typer.Option(
+        False,
+        "--autodev",
+        help="Run full autonomous development loop: analyze -> implement -> test -> fix -> repeat. "
+             "Automatically implements tasks using Claude API, runs tests, and fixes failures.",
+    ),
+    max_iterations: int = typer.Option(
+        10,
+        "--max-iterations",
+        "-n",
+        help="Maximum iterations for loop mode (default: 10).",
+    ),
+    human_approve: bool = typer.Option(
+        None,
+        "--human-approve/--no-human-approve",
+        help="Require human approval after each iteration (default from config).",
+    ),
     auto_implement: bool = typer.Option(
         False,
         "--auto-implement",
         "-a",
         help="Automatically run Claude Code to implement changes.",
+    ),
+    test_command: Optional[str] = typer.Option(
+        None,
+        "--test-command",
+        "-t",
+        help="Test command to run after each implementation (default: pytest -q).",
+    ),
+    create_branch: bool = typer.Option(
+        None,
+        "--create-branch/--no-create-branch",
+        help="Create a new branch for loop work (default from config).",
     ),
     verbose: bool = typer.Option(
         False,
@@ -213,6 +248,18 @@ def refine(
     if auto_implement:
         config.auto_implement = True
 
+    # Apply loop config overrides from CLI
+    if human_approve is not None:
+        config.loop.human_approve = human_approve
+    if test_command is not None:
+        config.loop.test_command = test_command
+    if create_branch is not None:
+        config.loop.create_branch = create_branch
+    if max_iterations:
+        config.loop.max_iterations = max_iterations
+    if dry_run:
+        config.loop.dry_run = True
+
     # Validate configuration
     errors = config.validate()
     if errors:
@@ -266,7 +313,15 @@ def refine(
         console.print("[dim]Ollama:[/dim] Will analyze full codebase locally (free), send only relevant files to Perplexity")
         if focus:
             console.print(f"[dim]Focus:[/dim] {focus}")
-            console.print("[dim]Mode:[/dim] Feature-focused (Perplexity selects and rewrites prompts)")
+            if autodev:
+                console.print(f"[dim]Mode:[/dim] Autonomous development loop (max {config.loop.max_iterations} iterations)")
+                console.print(f"[dim]Test command:[/dim] {config.loop.test_command}")
+                console.print(f"[dim]Human approval:[/dim] {'enabled' if config.loop.human_approve else 'disabled'}")
+                console.print(f"[dim]Create branch:[/dim] {'yes' if config.loop.create_branch else 'no'}")
+            elif loop:
+                console.print(f"[dim]Mode:[/dim] Iterative feature-focused (loop until complete, max {max_iterations} iterations)")
+            else:
+                console.print("[dim]Mode:[/dim] Feature-focused (Perplexity selects and rewrites prompts)")
     console.print()
 
     # Run refinement (or dry-run preview)
@@ -278,6 +333,22 @@ def refine(
             raise typer.Exit(0)
         result = orchestrator.refine_dry_run(profile)
         _display_dry_run_results(result)
+    elif autodev:
+        # Autonomous development loop: analyze -> implement -> test -> fix -> repeat
+        if not smart or not focus:
+            console.print("[red]Error:[/red] --autodev requires --smart and --focus flags.")
+            console.print("[dim]Example: metaagent refine --smart --focus 'add feature' --autodev[/dim]")
+            raise typer.Exit(1)
+        result = orchestrator.run_autonomous_loop(feature_request=focus)
+        _display_autonomous_loop_results(result)
+    elif smart and focus and loop:
+        # Iterative feature-focused mode: Loop until feature is complete
+        result = orchestrator.refine_with_feature_focus_iterative(
+            feature_request=focus,
+            max_iterations=max_iterations,
+        )
+        _display_refinement_results(result)
+        _display_iteration_summary(result)
     elif smart and focus:
         # Feature-focused mode: Ollama does file selection, Perplexity does heavy lifting
         # (selects and rewrites codebase-digest prompts for this specific feature)
@@ -367,6 +438,215 @@ def _display_refinement_results(result) -> None:
         console.print("  3. Ask Claude Code to implement the plan")
 
 
+def _display_iteration_summary(result) -> None:
+    """Display a summary of iterations for iterative mode.
+
+    Args:
+        result: RefinementResult from iterative refinement.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if not result.iterations:
+        return
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold cyan]ITERATION SUMMARY[/bold cyan]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Get the latest layer status from the last iteration
+    latest_layer_status = None
+    for it in reversed(result.iterations):
+        if it.layer_status:
+            latest_layer_status = it.layer_status
+            break
+
+    # Show layer progress bar
+    layer_names = ["Scaffold", "Core", "Integration", "Polish"]
+
+    if latest_layer_status:
+        # Use actual layer status from the response
+        layer_complete = [
+            latest_layer_status.scaffold_complete,
+            latest_layer_status.core_complete,
+            latest_layer_status.integration_complete,
+            latest_layer_status.polish_complete,
+        ]
+
+        layer_display = ""
+        for i, (name, complete) in enumerate(zip(layer_names, layer_complete), 1):
+            if complete:
+                layer_display += f"[green][+][/green] {name}  "
+            elif i == latest_layer_status.current_layer:
+                layer_display += f"[yellow][>][/yellow] {name}  "
+            else:
+                layer_display += f"[dim][ ] {name}[/dim]  "
+
+        console.print(f"  Layers: {layer_display}")
+        if latest_layer_status.layer_progress:
+            # Truncate long progress messages
+            progress = latest_layer_status.layer_progress
+            if len(progress) > 80:
+                progress = progress[:80] + "..."
+            console.print(f"  [dim]{progress}[/dim]")
+    else:
+        # Fallback: determine from stage names if no layer_status
+        completed_layers = 0
+        for stage in result.stage_results:
+            stage_name = stage.stage_name.lower()
+            if "layer 1" in stage_name or "scaffold" in stage_name:
+                completed_layers = max(completed_layers, 1)
+            elif "layer 2" in stage_name or "core" in stage_name:
+                completed_layers = max(completed_layers, 2)
+            elif "layer 3" in stage_name or "integration" in stage_name:
+                completed_layers = max(completed_layers, 3)
+            elif "layer 4" in stage_name or "polish" in stage_name:
+                completed_layers = max(completed_layers, 4)
+
+        layer_display = ""
+        for i, name in enumerate(layer_names, 1):
+            if i <= completed_layers:
+                layer_display += f"[green][+][/green] {name}  "
+            else:
+                layer_display += f"[dim][ ] {name}[/dim]  "
+
+        console.print(f"  Layers: {layer_display}")
+
+    console.print()
+
+    # Show iteration table
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Layer", width=15)
+    table.add_column("Tasks", width=6)
+    table.add_column("Status", width=10)
+
+    for it in result.iterations:
+        if it.prompts_run:
+            # Use layer_status if available
+            if it.layer_status:
+                layer_info = it.layer_status.layer_name.capitalize()
+            else:
+                # Fallback: extract layer from stage name
+                layer_info = "Unknown"
+                if it.stage_results:
+                    stage_name = it.stage_results[0].stage_name
+                    if "Layer 1" in stage_name:
+                        layer_info = "Scaffold"
+                    elif "Layer 2" in stage_name:
+                        layer_info = "Core"
+                    elif "Layer 3" in stage_name:
+                        layer_info = "Integration"
+                    elif "Layer 4" in stage_name:
+                        layer_info = "Polish"
+
+            status = "[green]Done[/green]" if it.changes_made else "[yellow]Pending[/yellow]"
+            task_count = str(len(it.stage_results[0].tasks)) if it.stage_results else "0"
+            table.add_row(str(it.iteration), layer_info, task_count, status)
+        else:
+            # Feature complete - show final status
+            if it.layer_status:
+                layer_info = "[green]Complete[/green]"
+            else:
+                layer_info = "[green]Complete[/green]"
+            table.add_row(str(it.iteration), layer_info, "-", "[green]Done[/green]")
+
+    console.print(table)
+    console.print()
+
+
+def _display_autonomous_loop_results(result) -> None:
+    """Display results from the autonomous development loop.
+
+    Args:
+        result: AutonomousLoopResult from the autonomous loop.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if result.success:
+        console.print("\n[green]Autonomous development loop completed successfully![/green]\n")
+    else:
+        console.print("\n[yellow]Autonomous development loop completed with issues.[/yellow]\n")
+
+    console.print(Panel.fit(
+        "[bold cyan]AUTONOMOUS LOOP SUMMARY[/bold cyan]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Summary stats
+    console.print(f"[bold]Iterations:[/bold] {result.iterations_completed}/{result.max_iterations}")
+    console.print(f"[bold]Tasks implemented:[/bold] {result.tasks_completed}")
+    console.print(f"[bold]Tests passed:[/bold] {result.tests_passed}")
+    console.print(f"[bold]Fixes applied:[/bold] {result.fixes_applied}")
+    if result.tokens_used > 0:
+        console.print(f"[bold]Tokens used:[/bold] {result.tokens_used:,}")
+    console.print()
+
+    # Show iteration details
+    if result.iteration_details:
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Task", width=40)
+        table.add_column("Tests", width=8)
+        table.add_column("Fixes", width=6)
+        table.add_column("Status", width=10)
+
+        for detail in result.iteration_details:
+            task_name = detail.get("task", "Unknown")[:40]
+            tests = "[green]Pass[/green]" if detail.get("tests_passed") else "[red]Fail[/red]"
+            fixes = str(detail.get("fixes_applied", 0))
+            status = "[green]Done[/green]" if detail.get("success") else "[red]Failed[/red]"
+            table.add_row(str(detail.get("iteration", "?")), task_name, tests, fixes, status)
+
+        console.print(table)
+        console.print()
+
+    # Show branch info if created
+    if result.branch_name:
+        console.print(f"[bold]Work branch:[/bold] {result.branch_name}")
+        console.print(f"[bold]Commits:[/bold] {result.commits_made}")
+        console.print()
+
+    # Show final evaluation if available
+    if result.final_evaluation:
+        console.print(Panel(
+            f"[bold]Final PRD Evaluation:[/bold]\n{result.final_evaluation}",
+            border_style="green" if result.prd_aligned else "yellow",
+        ))
+        console.print()
+
+    # Show error if any
+    if result.error:
+        console.print(f"[red]Error:[/red] {result.error}")
+        console.print()
+
+    # Next steps
+    if result.success:
+        console.print(Panel(
+            "[bold green]SUCCESS[/bold green]\n\n"
+            "The autonomous loop has completed successfully.\n"
+            "All tasks have been implemented and tests are passing.\n\n"
+            "Next steps:\n"
+            "1. Review the changes in your working branch\n"
+            "2. Run full test suite\n"
+            "3. Create a pull request if satisfied",
+            border_style="green",
+        ))
+    else:
+        console.print(Panel(
+            "[bold yellow]INCOMPLETE[/bold yellow]\n\n"
+            "The autonomous loop stopped before completion.\n\n"
+            "Review the iteration details above to understand what happened.\n"
+            "You can re-run with --autodev to continue from where it left off.",
+            border_style="yellow",
+        ))
+
+
 def _display_implementation_report(report) -> None:
     """Display the structured implementation report for the current session.
 
@@ -401,17 +681,18 @@ def _display_implementation_report(report) -> None:
 
     if priority_counts:
         console.print("[bold]Tasks by Priority:[/bold]")
-        priority_emojis = {
-            "critical": "🔴",
-            "high": "🟠",
-            "medium": "🟡",
-            "low": "🟢",
+        # Use ASCII-safe markers that work on all terminals
+        priority_markers = {
+            "critical": "[red][!][/red]",
+            "high": "[yellow][*][/yellow]",
+            "medium": "[blue][-][/blue]",
+            "low": "[green][.][/green]",
         }
         for priority in ["critical", "high", "medium", "low"]:
             count = priority_counts.get(priority, 0)
             if count > 0:
-                emoji = priority_emojis.get(priority, "⚪")
-                console.print(f"  {emoji} {priority.title()}: {count}")
+                marker = priority_markers.get(priority, "[ ]")
+                console.print(f"  {marker} {priority.title()}: {count}")
         console.print()
 
     # Display each task
@@ -423,14 +704,15 @@ def _display_implementation_report(report) -> None:
 
     for i, task in enumerate(sorted_tasks, 1):
         priority = task.priority.lower()
-        emoji = {
-            "critical": "🔴",
-            "high": "🟠",
-            "medium": "🟡",
-            "low": "🟢",
-        }.get(priority, "⚪")
+        # Use ASCII-safe markers that work on all terminals
+        marker = {
+            "critical": "[red][!][/red]",
+            "high": "[yellow][*][/yellow]",
+            "medium": "[blue][-][/blue]",
+            "low": "[green][.][/green]",
+        }.get(priority, "[ ]")
 
-        console.print(f"[bold]{i}. {emoji} {task.title}[/bold]")
+        console.print(f"[bold]{i}. {marker} {task.title}[/bold]")
         console.print(f"   [dim]Priority:[/dim] {priority.title()}", end="")
         if task.estimated_complexity:
             console.print(f" | [dim]Complexity:[/dim] {task.estimated_complexity}", end="")
@@ -823,6 +1105,61 @@ def list_prompts(
 
         console.print(table)
         console.print()
+
+
+@app.command("dashboard")
+def dashboard(
+    port: int = typer.Option(
+        8765,
+        "--port",
+        "-p",
+        help="Port to run the dashboard server on.",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        "-h",
+        help="Host to bind the dashboard server to.",
+    ),
+) -> None:
+    """Launch the real-time observability dashboard.
+
+    The dashboard provides a live view of meta-agent refinement progress,
+    including layer tracking, task status, and logs.
+
+    After starting the dashboard, run a refinement in another terminal
+    and watch the progress in real-time at http://localhost:8765
+
+    Examples:
+        # Start dashboard on default port:
+        metaagent dashboard
+
+        # Start on custom port:
+        metaagent dashboard --port 9000
+
+        # Then in another terminal, run refinement:
+        metaagent refine --smart --focus "add feature" --loop
+    """
+    try:
+        from .dashboard import run_server
+    except ImportError:
+        console.print("[red]Error:[/red] Dashboard dependencies not installed.")
+        console.print("[dim]Install with: pip install fastapi uvicorn websockets[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold cyan]Meta-Agent Dashboard[/bold cyan]")
+    console.print(f"[dim]Starting server at http://{host}:{port}[/dim]")
+    console.print()
+    console.print("Open the URL in your browser to view the dashboard.")
+    console.print("Run a refinement in another terminal to see live progress.")
+    console.print()
+    console.print("[dim]Press Ctrl+C to stop the server.[/dim]")
+    console.print()
+
+    try:
+        run_server(host=host, port=port)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Dashboard server stopped.[/dim]")
 
 
 if __name__ == "__main__":
