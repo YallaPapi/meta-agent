@@ -2058,13 +2058,188 @@
         "status": "done",
         "subtasks": [],
         "updatedAt": "2025-12-18T01:56:21.597Z"
+      },
+      {
+        "id": "72",
+        "title": "Analyze existing meta-agent codebase and identify loop/orchestrator architecture",
+        "description": "Inspect the current project structure, orchestrator, config, CLI, and git/workspace management to align new local loop and Grok integration with existing patterns.",
+        "details": "1. Use GlobTool on project root `C:\\Users\\asus\\Desktop\\projects\\meta-agent` to map structure:\n   - Patterns: `**/pyproject.toml`, `**/package.json`, `**/README.md`, `**/src/**/*.py`, `**/config/**/*.yaml`, `**/tests/**/*.py`, `**/workspace_manager.py`, `**/orchestrator*.py`, `**/cli*.py`.\n2. Use Read tool to open:\n   - `pyproject.toml` (to confirm dependencies, entry points, package name)\n   - `src/metaagent/config.py`\n   - `src/metaagent/orchestrator.py` (or similarly named orchestrator module)\n   - CLI entry module (e.g., `src/metaagent/cli.py` or `__main__.py`)\n   - Existing loop implementation (search for `--autodev`, `run_autonomous_loop`, etc.).\n3. Use Grep tool:\n   - Search for `autodev`, `run_autodev`, `AutonomousLoop`, `workspace_manager`, `Repomix`, `perplexity` to find current autonomous loop and evaluator integration.\n   - Search for `Repomix` usage to understand how repo packing is done and how XML/PRD is passed.\n4. Document findings in an internal dev note (e.g., `docs/local_loop_architecture.md`):\n   - Current orchestrator responsibilities and extension points.\n   - How configuration is loaded and passed around (LoopConfig, etc.).\n   - Current error-diagnosis workflow using Perplexity.\n   - Existing test patterns and fixtures for CLI and orchestrator.\n5. From this analysis, decide:\n   - Where to add `run_local_loop` (likely same Orchestrator class used for `--autodev`).\n   - How to extend existing config structures without breaking compatibility.\n   - How to wire new LocalRepoManager analogously to existing workspace manager if present.\n",
+        "testStrategy": "- This task is analytical; validate by:\n  - Verifying that identified files actually exist and open correctly via Read tool.\n  - Confirming that key concepts from PRD (orchestrator, autodev, workspace manager, evaluator/perplexity usage) are mapped to concrete modules or confirming their absence.\n  - Optionally add a minimal doc (no code changes) and ensure tests still pass to establish a green baseline before implementation.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:15:06.491Z"
+      },
+      {
+        "id": "73",
+        "title": "Add GitPython dependency and verify environment tooling",
+        "description": "Introduce GitPython and python-dotenv dependencies in pyproject configuration and ensure they install and import correctly in the existing environment.",
+        "details": "1. Open `pyproject.toml` using Read tool.\n2. Add dependencies under the appropriate section (likely `[project.dependencies]` or `[tool.poetry.dependencies]` depending on toolchain):\n   - `GitPython>=3.1.43`\n   - Ensure `python-dotenv` is present; if not, add `python-dotenv>=1.0.1` per PRD Windows/env requirements.\n3. If the project uses optional extras or dev dependencies, keep consistency with existing style.\n4. If there is a `requirements.txt` for CI or examples, mirror the new deps there if that is an established project pattern.\n5. Pseudo-code for verification script (optional, for local dev):\n   ```python\n   # scripts/check_deps.py\n   import git\n   from dotenv import load_dotenv\n\n   def main():\n       load_dotenv()\n       repo = git.Repo('.')\n       print(repo.git.status())\n\n   if __name__ == \"__main__\":\n       main()\n   ```\n",
+        "testStrategy": "- Run existing test suite: `pytest -q` to ensure no regressions from dependency changes.\n- In a Python REPL in project venv, run `import git; import dotenv` to verify imports.\n- If project has any dependency lock files or CI workflows, run their install steps to confirm that dependency graph resolves successfully on at least one platform (Linux/macOS; Windows in later task).",
+        "priority": "high",
+        "dependencies": [
+          "72"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:15:42.718Z"
+      },
+      {
+        "id": "74",
+        "title": "Implement Grok API client module grok_client.py",
+        "description": "Create a Grok API client that wraps x.ai chat completions with proper configuration, env var loading, error handling, and timeouts.",
+        "details": "1. Determine target location via Glob/Read, e.g., `src/metaagent/clients/` or similar; align with existing Perplexity or Anthropic client placement discovered in task 72.\n2. Implement `src/metaagent/grok_client.py` (or place in existing clients package) with API constants and functions.\n3. Use `python-dotenv` and `os.environ` to support `GROK_API_KEY`.\n4. Implement function:\n   ```python\n   import os\n   import requests\n   from typing import List, Dict, Any\n\n   GROK_ENDPOINT = \"https://api.x.ai/v1/chat/completions\"\n\n   class GrokClientError(Exception):\n       pass\n\n   def query_grok(\n       messages: List[Dict[str, Any]],\n       model: str = \"grok-4\",\n       temperature: float = 0.3,\n       max_tokens: int = 4096,\n       timeout: int = 120,\n   ) -> str:\n       api_key = os.getenv(\"GROK_API_KEY\")\n       if not api_key:\n           raise GrokClientError(\"GROK_API_KEY environment variable is not set\")\n\n       headers = {\n           \"Authorization\": f\"Bearer {api_key}\",\n           \"Content-Type\": \"application/json\",\n       }\n\n       payload = {\n           \"model\": model,\n           \"messages\": messages,\n           \"temperature\": temperature,\n           \"max_tokens\": max_tokens,\n       }\n\n       try:\n           resp = requests.post(\n               GROK_ENDPOINT,\n               json=payload,\n               headers=headers,\n               timeout=timeout,\n           )\n       except requests.Timeout as exc:\n           raise GrokClientError(\"Grok API request timed out\") from exc\n       except requests.RequestException as exc:\n           raise GrokClientError(f\"Grok API request failed: {exc}\") from exc\n\n       if resp.status_code == 429:\n           # Rate limiting awareness\n           raise GrokClientError(\"Grok API rate limit exceeded (HTTP 429)\")\n       if not resp.ok:\n           raise GrokClientError(f\"Grok API error {resp.status_code}: {resp.text}\")\n\n       data = resp.json()\n       try:\n           return data[\"choices\"][0][\"message\"][\"content\"]\n       except (KeyError, IndexError, TypeError) as exc:\n           raise GrokClientError(\"Unexpected Grok API response format\") from exc\n   ```\n5. Ensure types and imports align with project conventions (e.g., use `httpx` instead of `requests` if that is what the repo already uses—confirm via Grep before finalizing).\n6. Document usage in module docstring, noting default model and timeouts.\n",
+        "testStrategy": "- Create `tests/test_grok_client.py`:\n  - Use `monkeypatch` or `requests_mock`/`responses` (or equivalent in repo) to mock HTTP responses.\n  - Test successful response path returns the expected content.\n  - Test missing `GROK_API_KEY` raises `GrokClientError` with clear message.\n  - Test timeout by mocking `requests.post` to raise `requests.Timeout` and assert correct error.\n  - Test 429 and non-2xx errors raise informative exceptions.\n  - Test malformed JSON or missing fields raises `GrokClientError`.\n- Run `pytest -q tests/test_grok_client.py`.",
+        "priority": "high",
+        "dependencies": [
+          "72",
+          "73"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:17:17.562Z"
+      },
+      {
+        "id": "75",
+        "title": "Extend configuration for evaluator settings and Grok defaults",
+        "description": "Update loop configuration YAML and Python config dataclasses to support evaluator selection and Grok-specific options while preserving existing Perplexity support.",
+        "details": "1. Open `config/loop_config.yaml` and extend with evaluator and loop blocks per PRD:\n   ```yaml\n   evaluator:\n     default: \"grok\"  # grok or perplexity\n     grok:\n       model: \"grok-4\"\n       temperature: 0.3\n       max_tokens: 4096\n       timeout: 120\n     perplexity:\n       model: \"llama-3.1-sonar-large-128k-online\"\n\n   loop:\n     max_iterations: 15\n     human_approve: true\n     test_command: \"pytest -q\"\n     branch_prefix: \"meta-loop\"\n     commit_per_task: true\n     dry_run: false\n   ```\n   - Ensure indentation and anchors (if any) match existing style.\n2. Open `src/metaagent/config.py` and inspect how config is currently modeled.\n3. Introduce an `EvaluatorConfig` dataclass; e.g.:\n   ```python\n   from dataclasses import dataclass\n   from typing import Literal\n\n   EvaluatorName = Literal[\"grok\", \"perplexity\"]\n\n   @dataclass\n   class GrokSettings:\n       model: str\n       temperature: float\n       max_tokens: int\n       timeout: int\n\n   @dataclass\n   class PerplexitySettings:\n       model: str\n\n   @dataclass\n   class EvaluatorConfig:\n       default: EvaluatorName\n       grok: GrokSettings\n       perplexity: PerplexitySettings\n   ```\n4. Extend `LoopConfig` (or equivalent existing loop config dataclass) to include:\n   - `evaluator: EvaluatorConfig`\n   - `loop` options if not already modeled (`max_iterations`, `human_approve`, `test_command`, `branch_prefix`, `commit_per_task`, `dry_run`).\n5. Update config loading logic to:\n   - Parse new YAML sections into dataclasses.\n   - Provide sensible fallbacks if evaluator section is missing, to avoid breaking older configs.\n6. Provide a helper selector function, e.g.:\n   ```python\n   def get_evaluator_name(cfg: LoopConfig, override: str | None) -> str:\n       if override in (\"grok\", \"perplexity\"):\n           return override\n       return cfg.evaluator.default\n   ```\n",
+        "testStrategy": "- Add/extend unit tests in `tests/test_config.py` (or create if absent):\n  - Load `loop_config.yaml` and assert `EvaluatorConfig` and nested settings are parsed correctly.\n  - Verify default evaluator is `grok` when not overridden.\n  - Verify `get_evaluator_name` respects CLI override.\n  - Ensure that if evaluator fields are missing, code either populates defaults or raises a clear error but does not break unrelated functionality.\n- Run relevant config tests and full suite with `pytest -q`.",
+        "priority": "high",
+        "dependencies": [
+          "72",
+          "73"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:18:32.273Z"
+      },
+      {
+        "id": "76",
+        "title": "Implement GitPython-based LocalRepoManager for local-first git operations",
+        "description": "Create LocalRepoManager using GitPython to manage branches, commits, and test execution directly in the current repository, with Windows-compatible behavior.",
+        "details": "1. Identify appropriate module location (e.g., `src/metaagent/local_manager.py`) consistent with any existing `workspace_manager.py`.\n2. Define `LocalRepoManager` class skeleton:\n   ```python\n   import os\n   from datetime import datetime\n   from pathlib import Path\n   from typing import Optional\n\n   import git\n   import subprocess\n\n   from .config import LoopConfig\n\n   class TestResult:\n       def __init__(self, success: bool, stdout: str, stderr: str, returncode: int):\n           self.success = success\n           self.stdout = stdout\n           self.stderr = stderr\n           self.returncode = returncode\n\n   class LocalRepoManager:\n       \"\"\"Manages local git operations using GitPython.\"\"\"\n\n       def __init__(self, config: LoopConfig):\n           self.config = config\n           self.repo = git.Repo(os.getcwd())\n           self.branch_prefix = config.loop.branch_prefix\n       \n       def _new_branch_name(self) -> str:\n           ts = datetime.now().strftime(\"%Y%m%d-%H%M\")\n           return f\"{self.branch_prefix}-{ts}\"\n\n       def create_branch(self) -> str:\n           current = self.repo.active_branch\n           if current.name in (\"main\", \"master\"):\n               branch_name = self._new_branch_name()\n               new_branch = self.repo.create_head(branch_name)\n               new_branch.checkout()\n               return branch_name\n           # If already on a feature branch, reuse it to avoid touching main/master\n           return current.name\n\n       def commit_changes(self, message: str) -> Optional[str]:\n           self.repo.git.add(all=True)\n           if not self.has_uncommitted_changes():\n               return None\n           commit = self.repo.index.commit(message)\n           return commit.hexsha\n\n       def run_tests(self, command: str = \"pytest -q\") -> TestResult:\n           from shlex import split\n           from subprocess import Popen, PIPE\n\n           # Windows-compatible: use list args\n           if isinstance(command, str):\n               cmd_list = split(command)\n           else:\n               cmd_list = command\n\n           proc = Popen(cmd_list, stdout=PIPE, stderr=PIPE, text=True)\n           stdout, stderr = proc.communicate()\n           return TestResult(proc.returncode == 0, stdout, stderr, proc.returncode)\n\n       def get_current_branch(self) -> str:\n           return self.repo.active_branch.name\n\n       def has_uncommitted_changes(self) -> bool:\n           return self.repo.is_dirty(untracked_files=True)\n   ```\n3. Ensure Windows compatibility:\n   - Use `Path`/`os.path.join` for any paths.\n   - Use list-form subprocess commands and `text=True` for universal newlines; handle CRLF naturally.\n4. Avoid operations on remote; keep all git actions local.\n5. Keep behavior non-destructive to `main`/`master`—never commit there within loop.\n",
+        "testStrategy": "- Create `tests/test_local_manager.py`:\n  - Use `tmp_path` to initialize a temporary git repo (`git.Repo.init(tmpdir)`), create a dummy file, commit initial state, then run tests against LocalRepoManager instantiated with a `LoopConfig` pointing `branch_prefix` to a test prefix.\n  - Test `create_branch`:\n    - Starting on `master` or `main` should create and checkout a new branch with prefix and timestamp.\n  - Test `commit_changes`:\n    - Modify a file, ensure a new commit hash is returned and repo is clean afterward.\n    - If no changes, ensure `None` is returned.\n  - Test `run_tests`:\n    - Use a trivial test command, e.g., `python -c \"print('ok')\"` injected via config, and assert success.\n  - Test `has_uncommitted_changes` and `get_current_branch` behaviors.\n- Run new tests with `pytest -q tests/test_local_manager.py`.",
+        "priority": "high",
+        "dependencies": [
+          "72",
+          "73",
+          "75"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:20:46.147Z"
+      },
+      {
+        "id": "77",
+        "title": "Enhance CLI with --loop mode and evaluator options",
+        "description": "Extend the existing metaagent CLI to support --loop PRD path, iteration and evaluator options, wired into orchestrator entry points.",
+        "details": "1. Open CLI module (e.g., `src/metaagent/cli.py`) identified in task 72.\n2. Determine the CLI framework in use (`argparse`, `click`, `typer`, etc.) and follow existing patterns for adding new subcommands/flags.\n3. Add `--loop PATH` flag to the `refine` command (or equivalent):\n   - `--loop PATH`: string path to PRD file.\n   - Additional flags:\n     - `--max-iterations INT` (default 15; override config.loop.max_iterations).\n     - `--human-approve` (bool flag; overrides config.loop.human_approve).\n     - `--dry-run` (bool flag; overrides config.loop.dry_run).\n     - `--evaluator {grok,perplexity}` (optional evaluator override).\n     - `--branch-prefix PREFIX` (override config.loop.branch_prefix).\n4. CLI logic pseudo-code:\n   ```python\n   def refine_cmd(..., loop: str | None, max_iterations: int | None, human_approve: bool, dry_run: bool, evaluator: str | None, branch_prefix: str | None):\n       cfg = load_loop_config()\n       if branch_prefix:\n           cfg.loop.branch_prefix = branch_prefix\n       if max_iterations is not None:\n           cfg.loop.max_iterations = max_iterations\n       if human_approve:\n           cfg.loop.human_approve = True\n       if dry_run:\n           cfg.loop.dry_run = True\n\n       orch = Orchestrator(cfg)\n\n       if loop:\n           result = orch.run_local_loop(loop, evaluator_override=evaluator)\n           print(result.to_cli_summary())\n           return\n\n       # fallback to existing behavior (e.g. autodev)\n   ```\n5. Ensure backward compatibility:\n   - Existing `--autodev` and other flags remain unchanged.\n   - If both `--loop` and `--autodev` are provided, either raise a clear error or define precedence, consistent with project patterns.\n6. Use `pathlib.Path(loop).resolve()` for PRD path handling and validate that the file exists, failing fast with a helpful message if not.\n",
+        "testStrategy": "- Add or extend CLI tests (e.g., `tests/test_cli.py`):\n  - Use CLI test helpers (e.g., `CliRunner` if click/typer, or `subprocess.run` for argparse script) to invoke `metaagent refine --help` and assert `--loop` and related flags appear.\n  - Test invoking `metaagent refine --loop docs/prd.md --dry-run` with mocks:\n    - Mock `Orchestrator.run_local_loop` to avoid executing the full loop; assert it is called with expected arguments.\n  - Test invalid path for `--loop` raises a clear error and non-zero exit code.\n- Run tests focused on CLI plus full test suite to ensure no regressions.",
+        "priority": "high",
+        "dependencies": [
+          "72",
+          "75",
+          "76"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:22:58.087Z"
+      },
+      {
+        "id": "78",
+        "title": "Implement run_local_loop orchestration flow using LocalRepoManager and Grok",
+        "description": "Add run_local_loop method to Orchestrator to execute the autonomous local development loop with Grok-based diagnosis and final evaluation.",
+        "details": "1. Open orchestrator module (e.g., `src/metaagent/orchestrator.py`) and review existing `run_autodev` or similar to mirror patterns.\n2. Define data structures for `AutonomousLoopResult` (reuse existing if present) to hold summaries, commits, evaluations, etc.\n3. Implement `run_local_loop(self, prd_path: str, evaluator_override: str | None = None) -> AutonomousLoopResult`:\n   - Read PRD text:\n     ```python\n     from pathlib import Path\n     prd_text = Path(prd_path).read_text(encoding=\"utf-8\")\n     ```\n   - Initialize `LocalRepoManager` with loaded `LoopConfig` and create a branch.\n   - Pack current repo with existing Repomix integration (identified via task 72):\n     - Follow existing helper to get `repo_xml` or similar representation.\n   - Generate task plan using existing analysis pipeline (reuse same function used by `--autodev`).\n   - For each task in plan, up to `loop.max_iterations`:\n     - Use Claude integration already in the project to implement the task (mirroring autodev behavior).\n     - If `config.loop.dry_run` is false and `config.loop.commit_per_task` is true:\n       - Use `LocalRepoManager.commit_changes` with a descriptive message (e.g., `\"[loop] Implement task {i}: {title}\"`).\n     - Run tests with `LocalRepoManager.run_tests(config.loop.test_command)`.\n     - If tests fail:\n       - Prepare error context (stdout/stderr) and pack repo again if necessary.\n       - Call `diagnose_with_grok` helper (task 79) to get a fix prompt.\n       - Use Claude to apply fix based on that prompt.\n       - Re-run tests, with a bounded retry loop (e.g., max 3 retries).\n     - If `config.loop.human_approve` is enabled, pause between tasks according to existing human approval mechanism.\n   - After tasks complete or loop max iterations reached:\n     - Call `evaluate_completion_with_grok` (task 79) with final `repo_xml` and `prd_text`.\n     - Populate `AutonomousLoopResult` with completion percentage, gaps, and assessment.\n4. Ensure evaluator selection:\n   - Use `get_evaluator_name` from config to determine whether to use Grok or Perplexity for diagnosis and evaluation, with Grok as default, but only Perplexity where explicitly requested.\n5. Maintain backward compatibility with existing orchestrator flows by not altering current methods other than shared helpers.\n",
+        "testStrategy": "- Add `tests/test_local_loop_integration.py` for high-level integration with heavy mocking:\n  - Mock `LocalRepoManager` to avoid real git and subprocess calls.\n  - Mock Claude client and `query_grok` so tests are deterministic.\n  - Provide a small dummy PRD file in `tests/fixtures` and simulate a 1–2 task plan.\n  - Assert that:\n    - `run_local_loop` reads the PRD file.\n    - `create_branch`, `commit_changes`, and `run_tests` are invoked appropriately.\n    - On simulated test failure, `diagnose_with_grok` is called and a retry attempt is made.\n    - Final `evaluate_completion_with_grok` is called and its JSON parsed into the result object.\n  - Verify that `max_iterations`, `dry_run`, and `human_approve` flags alter behavior as expected (at least via mocks/flags).\n- Run full test suite to ensure compatibility with existing `--autodev` behavior.",
+        "priority": "high",
+        "dependencies": [
+          "72",
+          "74",
+          "75",
+          "76",
+          "77"
+        ],
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2025-12-18T02:22:58.382Z"
+      },
+      {
+        "id": "79",
+        "title": "Integrate Grok for error diagnosis and PRD evaluation with prompt templates",
+        "description": "Wire Grok client into orchestrator via diagnosis and evaluation helpers, using external prompt templates for maintainability.",
+        "details": "1. Create prompt template files:\n   - `config/prompt_library/meta_grok_diagnosis.md`\n   - `config/prompt_library/meta_grok_evaluation.md`\n2. Populate `meta_grok_diagnosis.md` with a template similar to PRD but parameterized, e.g.:\n   ```md\n   Task: {{task_description}}\n   Errors:\n   {{errors}}\n\n   Repository Context:\n   {{repo_context}}\n\n   Diagnose the root cause and write a precise, actionable prompt\n   for Claude to fix this issue. Be specific about file paths and\n   exact changes needed.\n   ```\n3. Populate `meta_grok_evaluation.md` with:\n   ```md\n   PRD Requirements:\n   {{prd_text}}\n\n   Current Implementation:\n   {{repo_context}}\n\n   Evaluate:\n   1. Are all PRD requirements implemented?\n   2. Code quality assessment\n   3. Any remaining gaps?\n   4. Overall completion percentage\n\n   Return JSON: {\"approved\": bool, \"completion_pct\": int, \"gaps\": [], \"assessment\": str}\n   ```\n4. Implement helper functions in a suitable module (e.g., `src/metaagent/grok_integration.py` or directly in orchestrator if consistent with style):\n   ```python\n   from pathlib import Path\n   from .grok_client import query_grok\n\n   def _load_template(name: str) -> str:\n       base = Path(__file__).resolve().parent.parent / \"config\" / \"prompt_library\"\n       return (base / name).read_text(encoding=\"utf-8\")\n\n   def diagnose_with_grok(repo_xml: str, task: dict, errors: str, cfg: LoopConfig) -> str:\n       template = _load_template(\"meta_grok_diagnosis.md\")\n       prompt = template.replace(\"{{task_description}}\", task[\"description\"]).replace(\n           \"{{errors}}\", errors\n       ).replace(\"{{repo_context}}\", repo_xml[:50000])\n\n       messages = [{\"role\": \"user\", \"content\": prompt}]\n       return query_grok(\n           messages,\n           model=cfg.evaluator.grok.model,\n           temperature=cfg.evaluator.grok.temperature,\n           max_tokens=cfg.evaluator.grok.max_tokens,\n           timeout=cfg.evaluator.grok.timeout,\n       )\n\n   def evaluate_completion_with_grok(repo_xml: str, prd_text: str, cfg: LoopConfig) -> dict:\n       template = _load_template(\"meta_grok_evaluation.md\")\n       prompt = template.replace(\"{{prd_text}}\", prd_text).replace(\n           \"{{repo_context}}\", repo_xml[:50000]\n       )\n\n       messages = [{\"role\": \"user\", \"content\": prompt}]\n       import json\n\n       raw = query_grok(\n           messages,\n           model=cfg.evaluator.grok.model,\n           temperature=cfg.evaluator.grok.temperature,\n           max_tokens=cfg.evaluator.grok.max_tokens,\n           timeout=cfg.evaluator.grok.timeout,\n       )\n       try:\n           return json.loads(raw)\n       except json.JSONDecodeError:\n           # Fallback: wrap raw string\n           return {\"approved\": False, \"completion_pct\": 0, \"gaps\": [\"Invalid JSON from Grok\"], \"assessment\": raw}\n   ```\n5. Ensure paths to `config/prompt_library` are robust on Windows by using `Path`/`os.path.join` relative to well-known project roots.\n6. In orchestrator’s `run_local_loop`, replace any previous Perplexity-based diagnosis/evaluation with these helpers when evaluator is Grok; retain Perplexity paths for backward compatibility when explicitly requested.\n",
+        "testStrategy": "- Add unit tests for helpers, e.g., `tests/test_grok_integration.py`:\n  - Use a temp directory or test fixture to simulate `config/prompt_library` location if path logic is complex, or rely on real files if allowed.\n  - Mock `query_grok` to return a simple string or JSON.\n  - Verify `diagnose_with_grok`:\n    - Loads template.\n    - Truncates `repo_xml` to <= 50000 chars.\n    - Calls `query_grok` with expected model/temperature/max_tokens/timeout from config.\n  - Verify `evaluate_completion_with_grok` parses valid JSON and falls back gracefully on invalid JSON.\n- Run tests plus targeted orchestrator tests that exercise these helpers in the context of `run_local_loop`.",
+        "priority": "medium",
+        "dependencies": [
+          "74",
+          "75",
+          "78"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "80",
+        "title": "Ensure Windows compatibility and dotenv configuration usage",
+        "description": "Audit new and existing loop-related code for Windows compatibility, path handling, and environment variable loading via python-dotenv.",
+        "details": "1. Review new modules (`grok_client.py`, `local_manager.py`, Grok integration helpers, CLI changes, orchestrator additions) for:\n   - Usage of `os.path.join` or `pathlib.Path` for any filesystem paths.\n   - Subprocess invocations using list-style arguments only.\n   - No shell-specific features; avoid `shell=True`.\n   - Text-mode I/O that naturally handles CRLF (open files with `encoding=\"utf-8\"`).\n2. Ensure `.env` loading is done once at application startup (e.g., in `src/metaagent/__init__.py` or CLI entrypoint):\n   ```python\n   from dotenv import load_dotenv\n   load_dotenv()\n   ```\n   - Confirm this does not conflict with existing env loading.\n3. Update `.env.example`:\n   ```bash\n   # Required for Grok evaluator\n   GROK_API_KEY=xai-xxx\n\n   # Existing\n   ANTHROPIC_API_KEY=sk-ant-xxx\n   PERPLEXITY_API_KEY=pplx-xxx\n   ```\n4. If any temporary paths or PRD paths are used, normalize them with `Path(path).expanduser().resolve()`.\n5. Optionally, add small helper for commands:\n   ```python\n   from shlex import split\n\n   def to_cmd_list(cmd: str | list[str]) -> list[str]:\n       if isinstance(cmd, str):\n           return split(cmd)\n       return cmd\n   ```\n   and reuse across subprocess calls.\n",
+        "testStrategy": "- On a Windows environment (or CI matrix job), run:\n  - `pytest -q` to confirm overall compatibility.\n  - A manual smoke test: `metaagent refine --loop docs/prd.md --dry-run` in a sample repo.\n- Add a unit test where feasible to verify `.env` is loaded (e.g., set `GROK_API_KEY` only in a `.env` in a temp working directory and ensure `query_grok` sees it when `load_dotenv` is called at startup, using monkeypatch of working directory).\n- Review that no tests assume POSIX-specific paths by using `Path` in fixture setups.",
+        "priority": "medium",
+        "dependencies": [
+          "73",
+          "74",
+          "76",
+          "77"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "81",
+        "title": "Expand automated tests for local loop, Grok, and config integration",
+        "description": "Add focused unit and integration tests covering new Grok evaluator behavior, LocalRepoManager, and run_local_loop end-to-end with mocks.",
+        "details": "1. Consolidate and extend tests created in earlier tasks:\n   - `tests/test_grok_client.py`\n   - `tests/test_local_manager.py`\n   - `tests/test_grok_integration.py`\n   - `tests/test_local_loop_integration.py`\n2. For integration tests, design scenarios:\n   - Successful full loop where tests pass on first try.\n   - Loop with a failing test that gets fixed after one Grok diagnosis-guided iteration.\n   - Loop hitting `max_iterations` early and stopping.\n3. Use mocking extensively to avoid external calls:\n   - Mock `query_grok` to return deterministic diagnosis and evaluation JSON.\n   - Mock Claude client calls to simulate code modifications without touching real files, or operate in a temporary git repo fixture.\n4. Ensure tests assert:\n   - Correct evaluator selection based on CLI override vs config default.\n   - `commit_per_task` behavior (commits only when enabled and changes exist).\n   - `dry_run` prevents commits and git operations but still runs planning logic (if that’s the defined behavior).\n5. If project uses coverage tools, confirm that new modules contribute to coverage thresholds.\n",
+        "testStrategy": "- Run `pytest -q` and ensure all new tests pass.\n- Optionally run `pytest -q tests/test_local_loop_integration.py -vv` to deeply inspect integration behavior.\n- If coverage is enabled (e.g., via `pytest-cov` in CI), check that new modules are exercised and coverage does not drop below project standards.",
+        "priority": "medium",
+        "dependencies": [
+          "74",
+          "75",
+          "76",
+          "77",
+          "78",
+          "79"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "82",
+        "title": "Update documentation and usage examples for Grok-powered local loop",
+        "description": "Document the new Grok-powered local development loop, configuration options, and CLI usage while highlighting coexistence with existing --autodev mode.",
+        "details": "1. Open top-level `README.md` and any `docs/` files related to autodev or refinement loops.\n2. Add a section “Grok-Powered Local Development Loop” describing:\n   - Purpose and benefits of local-first mode.\n   - Requirement for `GROK_API_KEY` in `.env`.\n3. Document CLI usage examples from PRD:\n   ```bash\n   metaagent refine --loop \"docs/prd.md\"\n   metaagent refine --loop \"docs/prd.md\" --max-iterations 15\n   metaagent refine --loop \"docs/prd.md\" --human-approve\n   metaagent refine --loop \"docs/prd.md\" --dry-run\n   metaagent refine --loop \"docs/prd.md\" --evaluator grok\n   metaagent refine --loop \"docs/prd.md\" --evaluator perplexity\n   ```\n4. Explain configuration in `config/loop_config.yaml`:\n   - `evaluator.default`, `evaluator.grok`, `evaluator.perplexity`.\n   - `loop.max_iterations`, `loop.human_approve`, `loop.test_command`, `loop.branch_prefix`, `loop.commit_per_task`, `loop.dry_run`.\n5. Clarify backward compatibility:\n   - `--autodev` mode still available and unaffected.\n   - Local loop is an additional option.\n6. If the project has CHANGELOG or release notes, add an entry documenting:\n   - Addition of Grok support.\n   - GitPython-based LocalRepoManager.\n   - New CLI flags.\n",
+        "testStrategy": "- Run markdown linter or documentation CI job if configured.\n- Manually verify that code snippets (`metaagent refine --loop ...`) match actual CLI behavior and flag names/types.\n- Have at least one maintainer or reviewer use the README instructions to execute a minimal local loop in a sample repo as an acceptance test.",
+        "priority": "low",
+        "dependencies": [
+          "74",
+          "75",
+          "76",
+          "77",
+          "78",
+          "79",
+          "80",
+          "81"
+        ],
+        "status": "pending",
+        "subtasks": []
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2025-12-18T02:00:05.057Z",
-      "taskCount": 70,
-      "completedCount": 54,
+      "lastModified": "2025-12-18T02:22:58.387Z",
+      "taskCount": 81,
+      "completedCount": 60,
       "tags": [
         "master"
       ]

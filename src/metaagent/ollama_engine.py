@@ -17,9 +17,9 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 
 # Recommended models for triage (balance of speed and quality)
 RECOMMENDED_MODELS = [
-    "llama3.2:3b",   # Fast, good for triage (2GB)
-    "llama3.1:8b",   # Better quality (4.7GB)
-    "mistral:7b",    # Good alternative (4.1GB)
+    "qwen2.5:7b",    # Best balance of speed and instruction-following (4.7GB)
+    "qwen2.5:14b",   # Better quality if you have VRAM (9GB)
+    "llama3.1:8b",   # Good alternative (4.7GB)
 ]
 
 
@@ -57,7 +57,7 @@ class OllamaEngine:
 
     def __init__(
         self,
-        model: str = "llama3.2:3b",
+        model: str = "qwen2.5:7b",
         base_url: str = OLLAMA_BASE_URL,
         timeout: int = 300,
     ):
