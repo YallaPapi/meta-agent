@@ -193,6 +193,23 @@ def refine(
         "--create-branch/--no-create-branch",
         help="Create a new branch for loop work (default from config).",
     ),
+    local_loop: Optional[Path] = typer.Option(
+        None,
+        "--local-loop",
+        help="Run Grok-powered local development loop with PRD file path. "
+             "Analyzes, implements, tests, and fixes using Grok for error diagnosis.",
+    ),
+    evaluator: Optional[str] = typer.Option(
+        None,
+        "--evaluator",
+        "-e",
+        help="Evaluator to use for error diagnosis: 'grok' (default) or 'perplexity'.",
+    ),
+    branch_prefix: Optional[str] = typer.Option(
+        None,
+        "--branch-prefix",
+        help="Custom branch prefix for loop work (default: meta-loop).",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -213,6 +230,13 @@ def refine(
 
         # With explicit config directory:
         metaagent refine --profile automation_agent --repo /path/to/repo --config-dir /path/to/meta-agent/config
+
+        # Grok-powered local development loop:
+        metaagent refine --local-loop docs/prd.md
+
+        # Local loop with options:
+        metaagent refine --local-loop docs/prd.md --max-iterations 15 --human-approve
+        metaagent refine --local-loop docs/prd.md --evaluator perplexity --dry-run
     """
     setup_logging(verbose)
     logger = logging.getLogger(__name__)
@@ -259,6 +283,8 @@ def refine(
         config.loop.max_iterations = max_iterations
     if dry_run:
         config.loop.dry_run = True
+    if branch_prefix is not None:
+        config.loop.branch_prefix = branch_prefix
 
     # Validate configuration
     errors = config.validate()
@@ -268,10 +294,62 @@ def refine(
             console.print(f"  - {error}")
         raise typer.Exit(1)
 
-    # Validate that either --profile or --smart is specified
+    # Handle --local-loop mode (Grok-powered local development loop)
+    if local_loop is not None:
+        # Validate PRD file exists
+        prd_path = local_loop.resolve()
+        if not prd_path.exists():
+            console.print(f"[red]Error:[/red] PRD file not found: {prd_path}")
+            raise typer.Exit(1)
+
+        # Validate evaluator option
+        if evaluator is not None and evaluator not in ("grok", "perplexity"):
+            console.print(f"[red]Error:[/red] Invalid evaluator '{evaluator}'. Use 'grok' or 'perplexity'.")
+            raise typer.Exit(1)
+
+        # Display local loop configuration
+        console.print(f"\n[bold]Starting Grok-powered local development loop[/bold]")
+        console.print(f"[dim]PRD file:[/dim] {prd_path}")
+        console.print(f"[dim]Target repo:[/dim] {repo_path}")
+        console.print(f"[dim]Config dir:[/dim] {cfg_dir}")
+        console.print(f"[dim]Evaluator:[/dim] {evaluator or config.loop.evaluator.default}")
+        console.print(f"[dim]Max iterations:[/dim] {config.loop.max_iterations}")
+        console.print(f"[dim]Test command:[/dim] {config.loop.test_command}")
+        console.print(f"[dim]Human approval:[/dim] {'enabled' if config.loop.human_approve else 'disabled'}")
+        console.print(f"[dim]Branch prefix:[/dim] {config.loop.branch_prefix}")
+        console.print(f"[dim]Dry run:[/dim] {'yes' if config.loop.dry_run else 'no'}")
+        console.print()
+
+        # Load prompt library for local loop
+        try:
+            prompt_library = PromptLibrary(
+                prompts_path=config.prompts_file,
+                profiles_path=config.profiles_file,
+                prompt_library_path=config.prompt_library_path,
+            )
+            prompt_library.load()
+        except FileNotFoundError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            console.print(f"[dim]Config directory: {cfg_dir}[/dim]")
+            raise typer.Exit(1)
+
+        # Run local loop
+        orchestrator = Orchestrator(config, prompt_library=prompt_library)
+        result = orchestrator.run_local_loop(
+            prd_path=str(prd_path),
+            evaluator_override=evaluator,
+        )
+        _display_local_loop_results(result)
+
+        if result.error:
+            console.print(f"\n[red]Error:[/red] {result.error}")
+            raise typer.Exit(1)
+        return
+
+    # Validate that either --profile or --smart is specified (for non-local-loop modes)
     if not smart and not profile:
-        console.print("[red]Error:[/red] Either --profile or --smart is required.")
-        console.print("[dim]Use --profile for predefined analysis stages, or --smart for intelligent Ollama-based triage.[/dim]")
+        console.print("[red]Error:[/red] Either --profile, --smart, or --local-loop is required.")
+        console.print("[dim]Use --profile for predefined analysis stages, --smart for Ollama triage, or --local-loop for Grok-powered local dev.[/dim]")
         raise typer.Exit(1)
 
     # Load and validate prompt library
@@ -643,6 +721,96 @@ def _display_autonomous_loop_results(result) -> None:
             "The autonomous loop stopped before completion.\n\n"
             "Review the iteration details above to understand what happened.\n"
             "You can re-run with --autodev to continue from where it left off.",
+            border_style="yellow",
+        ))
+
+
+def _display_local_loop_results(result) -> None:
+    """Display results from the Grok-powered local development loop.
+
+    Args:
+        result: LocalLoopResult from the local loop.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if result.success:
+        console.print("\n[green]Local development loop completed successfully![/green]\n")
+    else:
+        console.print("\n[yellow]Local development loop completed with issues.[/yellow]\n")
+
+    console.print(Panel.fit(
+        "[bold cyan]LOCAL LOOP SUMMARY[/bold cyan]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Summary stats
+    console.print(f"[bold]Iterations:[/bold] {result.iterations_completed}/{result.max_iterations}")
+    console.print(f"[bold]Tasks implemented:[/bold] {result.tasks_completed}")
+    console.print(f"[bold]Tests passed:[/bold] {result.tests_passed}")
+    console.print(f"[bold]Fixes applied:[/bold] {result.fixes_applied}")
+    console.print(f"[bold]Evaluator:[/bold] {result.evaluator_used}")
+    if result.tokens_used > 0:
+        console.print(f"[bold]Tokens used:[/bold] {result.tokens_used:,}")
+    console.print()
+
+    # Show iteration details
+    if result.iteration_details:
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Task", width=40)
+        table.add_column("Tests", width=8)
+        table.add_column("Fixes", width=6)
+        table.add_column("Status", width=10)
+
+        for detail in result.iteration_details:
+            task_name = detail.get("task", "Unknown")[:40]
+            tests = "[green]Pass[/green]" if detail.get("tests_passed") else "[red]Fail[/red]"
+            fixes = str(detail.get("fixes_applied", 0))
+            status = "[green]Done[/green]" if detail.get("success") else "[red]Failed[/red]"
+            table.add_row(str(detail.get("iteration", "?")), task_name, tests, fixes, status)
+
+        console.print(table)
+        console.print()
+
+    # Show branch info if created
+    if result.branch_name:
+        console.print(f"[bold]Work branch:[/bold] {result.branch_name}")
+        console.print(f"[bold]Commits:[/bold] {result.commits_made}")
+        console.print()
+
+    # Show final evaluation if available
+    if result.final_evaluation:
+        console.print(Panel(
+            f"[bold]Final PRD Evaluation (Grok):[/bold]\n{result.final_evaluation}",
+            border_style="green" if result.prd_aligned else "yellow",
+        ))
+        console.print()
+
+    # Show error if any
+    if result.error:
+        console.print(f"[red]Error:[/red] {result.error}")
+        console.print()
+
+    # Next steps
+    if result.success:
+        console.print(Panel(
+            "[bold green]SUCCESS[/bold green]\n\n"
+            "The Grok-powered local development loop has completed successfully.\n"
+            "All tasks have been implemented and tests are passing.\n\n"
+            "Next steps:\n"
+            "1. Review the changes in your working branch\n"
+            "2. Run full test suite\n"
+            "3. Create a pull request if satisfied",
+            border_style="green",
+        ))
+    else:
+        console.print(Panel(
+            "[bold yellow]INCOMPLETE[/bold yellow]\n\n"
+            "The local development loop stopped before completion.\n\n"
+            "Review the iteration details above to understand what happened.\n"
+            "You can re-run with --local-loop to continue from where it left off.",
             border_style="yellow",
         ))
 

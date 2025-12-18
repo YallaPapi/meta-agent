@@ -32,6 +32,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "jinja2>=3.1.0",
     "codebase-digest>=0.1.0",
+    "GitPython>=3.1.43",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,11 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
     "mypy>=1.5.0",
+]
+dashboard = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "websockets>=12.0",
 ]
 
 [project.scripts]

@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from metaagent.config import Config
+from metaagent.config import (
+    Config,
+    EvaluatorConfig,
+    GrokSettings,
+    LoopConfig,
+    PerplexitySettings,
+    get_evaluator_name,
+)
 
 
 class TestConfig:
@@ -124,3 +131,163 @@ class TestConfig:
         assert config.retry_max_attempts == 5
         assert config.retry_backoff_base == 1.5
         assert config.retry_backoff_max == 120.0
+
+
+class TestGrokSettings:
+    """Tests for GrokSettings class."""
+
+    def test_defaults(self) -> None:
+        """Test default Grok settings."""
+        settings = GrokSettings()
+        assert settings.model == "grok-3-latest"
+        assert settings.temperature == 0.3
+        assert settings.max_tokens == 4096
+        assert settings.timeout == 120
+
+    def test_from_dict_with_values(self) -> None:
+        """Test creating GrokSettings from dict."""
+        data = {
+            "model": "grok-2",
+            "temperature": 0.5,
+            "max_tokens": 8192,
+            "timeout": 60,
+        }
+        settings = GrokSettings.from_dict(data)
+        assert settings.model == "grok-2"
+        assert settings.temperature == 0.5
+        assert settings.max_tokens == 8192
+        assert settings.timeout == 60
+
+    def test_from_dict_with_defaults(self) -> None:
+        """Test creating GrokSettings from empty dict uses defaults."""
+        settings = GrokSettings.from_dict({})
+        assert settings.model == "grok-3-latest"
+        assert settings.temperature == 0.3
+
+
+class TestPerplexitySettings:
+    """Tests for PerplexitySettings class."""
+
+    def test_defaults(self) -> None:
+        """Test default Perplexity settings."""
+        settings = PerplexitySettings()
+        assert settings.model == "llama-3.1-sonar-large-128k-online"
+
+    def test_from_dict(self) -> None:
+        """Test creating PerplexitySettings from dict."""
+        data = {"model": "custom-model"}
+        settings = PerplexitySettings.from_dict(data)
+        assert settings.model == "custom-model"
+
+
+class TestEvaluatorConfig:
+    """Tests for EvaluatorConfig class."""
+
+    def test_defaults(self) -> None:
+        """Test default evaluator config."""
+        config = EvaluatorConfig()
+        assert config.default == "grok"
+        assert config.grok.model == "grok-3-latest"
+        assert config.perplexity.model == "llama-3.1-sonar-large-128k-online"
+
+    def test_from_dict(self) -> None:
+        """Test creating EvaluatorConfig from dict."""
+        data = {
+            "evaluator": {
+                "default": "perplexity",
+                "grok": {"model": "grok-2", "temperature": 0.7},
+                "perplexity": {"model": "custom-sonar"},
+            }
+        }
+        config = EvaluatorConfig.from_dict(data)
+        assert config.default == "perplexity"
+        assert config.grok.model == "grok-2"
+        assert config.grok.temperature == 0.7
+        assert config.perplexity.model == "custom-sonar"
+
+
+class TestGetEvaluatorName:
+    """Tests for get_evaluator_name helper."""
+
+    def test_returns_override_grok(self) -> None:
+        """Test override for grok."""
+        config = EvaluatorConfig(default="perplexity")
+        result = get_evaluator_name(config, "grok")
+        assert result == "grok"
+
+    def test_returns_override_perplexity(self) -> None:
+        """Test override for perplexity."""
+        config = EvaluatorConfig(default="grok")
+        result = get_evaluator_name(config, "perplexity")
+        assert result == "perplexity"
+
+    def test_returns_default_when_no_override(self) -> None:
+        """Test returns default when no override provided."""
+        config = EvaluatorConfig(default="grok")
+        result = get_evaluator_name(config, None)
+        assert result == "grok"
+
+    def test_returns_default_when_invalid_override(self) -> None:
+        """Test returns default when invalid override provided."""
+        config = EvaluatorConfig(default="grok")
+        result = get_evaluator_name(config, "invalid")
+        assert result == "grok"
+
+
+class TestLoopConfig:
+    """Tests for LoopConfig class."""
+
+    def test_defaults(self) -> None:
+        """Test default loop config."""
+        config = LoopConfig()
+        assert config.enabled is False
+        assert config.max_iterations == 15
+        assert config.human_approve is True
+        assert config.test_command == "pytest -q"
+        assert config.branch_prefix == "meta-loop"
+        assert config.evaluator.default == "grok"
+
+    def test_from_dict(self) -> None:
+        """Test creating LoopConfig from dict."""
+        data = {
+            "loop": {
+                "enabled": True,
+                "max_iterations": 20,
+                "human_approve": False,
+                "test_command": "npm test",
+                "branch_prefix": "custom-prefix",
+            },
+            "evaluator": {"default": "perplexity"},
+        }
+        config = LoopConfig.from_dict(data)
+        assert config.enabled is True
+        assert config.max_iterations == 20
+        assert config.human_approve is False
+        assert config.test_command == "npm test"
+        assert config.branch_prefix == "custom-prefix"
+        assert config.evaluator.default == "perplexity"
+
+    def test_load_from_file_not_exists(self, tmp_path: Path) -> None:
+        """Test loading from non-existent file returns defaults."""
+        config = LoopConfig.load_from_file(tmp_path)
+        assert config.enabled is False
+        assert config.max_iterations == 15
+
+    def test_load_from_file_exists(self, tmp_path: Path) -> None:
+        """Test loading from existing file."""
+        config_content = """
+loop:
+  enabled: true
+  max_iterations: 25
+  test_command: "pytest -v"
+evaluator:
+  default: "perplexity"
+"""
+        config_file = tmp_path / "loop_config.yaml"
+        config_file.write_text(config_content)
+
+        config = LoopConfig.load_from_file(tmp_path)
+        assert config.enabled is True
+        assert config.max_iterations == 25
+        assert config.test_command == "pytest -v"
+        assert config.evaluator.default == "perplexity"

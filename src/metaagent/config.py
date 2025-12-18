@@ -5,10 +5,82 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
+
+
+# Type alias for evaluator names
+EvaluatorName = Literal["grok", "perplexity"]
+
+
+@dataclass
+class GrokSettings:
+    """Settings for Grok API evaluator."""
+
+    model: str = "grok-3-latest"
+    temperature: float = 0.3
+    max_tokens: int = 4096
+    timeout: int = 120
+
+    @classmethod
+    def from_dict(cls, data: dict) -> GrokSettings:
+        """Create GrokSettings from dictionary."""
+        return cls(
+            model=data.get("model", "grok-3-latest"),
+            temperature=float(data.get("temperature", 0.3)),
+            max_tokens=int(data.get("max_tokens", 4096)),
+            timeout=int(data.get("timeout", 120)),
+        )
+
+
+@dataclass
+class PerplexitySettings:
+    """Settings for Perplexity API evaluator."""
+
+    model: str = "llama-3.1-sonar-large-128k-online"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PerplexitySettings:
+        """Create PerplexitySettings from dictionary."""
+        return cls(
+            model=data.get("model", "llama-3.1-sonar-large-128k-online"),
+        )
+
+
+@dataclass
+class EvaluatorConfig:
+    """Configuration for evaluator selection and settings."""
+
+    default: EvaluatorName = "grok"
+    grok: GrokSettings = field(default_factory=GrokSettings)
+    perplexity: PerplexitySettings = field(default_factory=PerplexitySettings)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> EvaluatorConfig:
+        """Create EvaluatorConfig from dictionary."""
+        evaluator_data = data.get("evaluator", {})
+        return cls(
+            default=evaluator_data.get("default", "grok"),
+            grok=GrokSettings.from_dict(evaluator_data.get("grok", {})),
+            perplexity=PerplexitySettings.from_dict(evaluator_data.get("perplexity", {})),
+        )
+
+
+def get_evaluator_name(config: EvaluatorConfig, override: Optional[str]) -> EvaluatorName:
+    """Get the evaluator name, respecting CLI override.
+
+    Args:
+        config: The evaluator configuration.
+        override: Optional CLI override for evaluator name.
+
+    Returns:
+        The evaluator name to use ("grok" or "perplexity").
+    """
+    if override in ("grok", "perplexity"):
+        return override  # type: ignore
+    return config.default
 
 
 @dataclass
@@ -16,16 +88,18 @@ class LoopConfig:
     """Configuration for autonomous development loop mode."""
 
     enabled: bool = False
-    max_iterations: int = 10
+    max_iterations: int = 15
     human_approve: bool = True
     dry_run: bool = False
     test_command: str = "pytest -q"
     claude_model: str = "claude-sonnet-4-20250514"
     commit_per_task: bool = True
     branch_pattern: str = "meta-agent-loop/{timestamp}"
+    branch_prefix: str = "meta-loop"
     create_branch: bool = True
     token_budget_per_iteration: int = 50000
     max_consecutive_failures: int = 3
+    evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> LoopConfig:
@@ -33,16 +107,18 @@ class LoopConfig:
         loop_data = data.get("loop", {})
         return cls(
             enabled=loop_data.get("enabled", False),
-            max_iterations=loop_data.get("max_iterations", 10),
+            max_iterations=loop_data.get("max_iterations", 15),
             human_approve=loop_data.get("human_approve", True),
             dry_run=loop_data.get("dry_run", False),
             test_command=loop_data.get("test_command", "pytest -q"),
             claude_model=loop_data.get("claude_model", "claude-sonnet-4-20250514"),
             commit_per_task=loop_data.get("commit_per_task", True),
             branch_pattern=loop_data.get("branch_pattern", "meta-agent-loop/{timestamp}"),
+            branch_prefix=loop_data.get("branch_prefix", "meta-loop"),
             create_branch=loop_data.get("create_branch", True),
             token_budget_per_iteration=loop_data.get("token_budget_per_iteration", 50000),
             max_consecutive_failures=loop_data.get("max_consecutive_failures", 3),
+            evaluator=EvaluatorConfig.from_dict(data),
         )
 
     @classmethod
@@ -50,7 +126,7 @@ class LoopConfig:
         """Load loop config from YAML file."""
         loop_config_path = config_dir / "loop_config.yaml"
         if loop_config_path.exists():
-            with open(loop_config_path) as f:
+            with open(loop_config_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             return cls.from_dict(data)
         return cls()  # Return defaults if file doesn't exist

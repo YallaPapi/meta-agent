@@ -29,6 +29,9 @@ from .analysis import (
     extract_json_from_response,
 )
 from .claude_impl import ClaudeImplementer, MockClaudeImplementer, ImplementationResult
+from .config import get_evaluator_name
+from .grok_client import GrokClient, MockGrokClient, GrokClientError
+from .local_manager import LocalRepoManager, MockLocalRepoManager, LocalRepoError
 from .claude_runner import (
     ClaudeCodeRunner,
     ClaudeCodeResult,
@@ -189,6 +192,30 @@ class AutonomousLoopResult:
     commits_made: int = 0
     final_evaluation: Optional[str] = None
     prd_aligned: bool = False
+    error: Optional[str] = None
+    iteration_details: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class LocalLoopResult:
+    """Result from the Grok-powered local development loop.
+
+    This dataclass captures the state of a local loop run using GitPython
+    and Grok for error diagnosis.
+    """
+
+    success: bool
+    iterations_completed: int
+    max_iterations: int
+    tasks_completed: int = 0
+    tests_passed: int = 0
+    fixes_applied: int = 0
+    tokens_used: int = 0
+    branch_name: Optional[str] = None
+    commits_made: int = 0
+    final_evaluation: Optional[str] = None
+    prd_aligned: bool = False
+    evaluator_used: str = "grok"
     error: Optional[str] = None
     iteration_details: list[dict] = field(default_factory=list)
 
@@ -3133,6 +3160,528 @@ class Orchestrator:
             prd_aligned=prd_aligned,
             iteration_details=iteration_details,
         )
+
+    def run_local_loop(
+        self,
+        prd_path: str,
+        evaluator_override: Optional[str] = None,
+    ) -> LocalLoopResult:
+        """Run the Grok-powered local development loop.
+
+        This method implements the local-first autonomous cycle using GitPython
+        and Grok for error diagnosis:
+        1. Read PRD from file
+        2. Initialize LocalRepoManager (creates branch)
+        3. Pack current repo with Repomix
+        4. Generate task plan
+        5. For each task:
+           a. Implement task (Claude)
+           b. Commit changes (if not dry-run)
+           c. Run tests
+           d. If tests fail: Grok diagnosis -> Claude fix -> retry
+        6. Final Grok evaluation of PRD alignment
+        7. Return summary result
+
+        Args:
+            prd_path: Path to the PRD file.
+            evaluator_override: Optional override for evaluator ('grok' or 'perplexity').
+
+        Returns:
+            LocalLoopResult with success status and details.
+        """
+        logger.info("Starting Grok-powered local development loop")
+        emit(EventType.SESSION_START, {"mode": "local_loop", "prd": prd_path})
+
+        loop_config = self.config.loop
+        max_iterations = loop_config.max_iterations
+        evaluator_name = get_evaluator_name(loop_config.evaluator, evaluator_override)
+
+        # Read PRD from file
+        prd_file = Path(prd_path)
+        if not prd_file.exists():
+            return LocalLoopResult(
+                success=False,
+                iterations_completed=0,
+                max_iterations=max_iterations,
+                evaluator_used=evaluator_name,
+                error=f"PRD file not found: {prd_path}",
+            )
+
+        try:
+            prd_content = prd_file.read_text(encoding="utf-8")
+        except Exception as e:
+            return LocalLoopResult(
+                success=False,
+                iterations_completed=0,
+                max_iterations=max_iterations,
+                evaluator_used=evaluator_name,
+                error=f"Failed to read PRD file: {e}",
+            )
+
+        # Initialize Claude implementer
+        if self.config.mock_mode:
+            claude_impl = MockClaudeImplementer(model=loop_config.claude_model)
+            grok_client = MockGrokClient()
+        else:
+            claude_impl = ClaudeImplementer(
+                api_key=self.config.anthropic_api_key,
+                model=loop_config.claude_model,
+            )
+            grok_client = GrokClient(
+                model=loop_config.evaluator.grok.model,
+                temperature=loop_config.evaluator.grok.temperature,
+                max_tokens=loop_config.evaluator.grok.max_tokens,
+                timeout=loop_config.evaluator.grok.timeout,
+            )
+
+        # Initialize local repo manager
+        try:
+            if self.config.mock_mode:
+                local_manager = MockLocalRepoManager(loop_config)
+            else:
+                local_manager = LocalRepoManager(loop_config, repo_path=self.config.repo_path)
+        except LocalRepoError as e:
+            return LocalLoopResult(
+                success=False,
+                iterations_completed=0,
+                max_iterations=max_iterations,
+                evaluator_used=evaluator_name,
+                error=f"Failed to initialize local repo manager: {e}",
+            )
+
+        # Create branch if configured
+        branch_name = None
+        if loop_config.create_branch and not loop_config.dry_run:
+            try:
+                branch_name = local_manager.create_branch()
+                logger.info(f"Working on branch: {branch_name}")
+            except Exception as e:
+                logger.warning(f"Failed to create branch: {e}")
+                branch_name = local_manager.get_current_branch()
+
+        # Track loop state
+        iterations_completed = 0
+        tasks_completed = 0
+        tests_passed = 0
+        fixes_applied = 0
+        tokens_used = 0
+        commits_made = 0
+        consecutive_failures = 0
+        iteration_details = []
+        final_evaluation = None
+        prd_aligned = False
+
+        try:
+            while iterations_completed < max_iterations:
+                iterations_completed += 1
+                logger.info(f"=== Local Loop Iteration {iterations_completed}/{max_iterations} ===")
+                emit(EventType.ITERATION_START, {"iteration": iterations_completed, "max": max_iterations})
+
+                # Step 1: Pack codebase
+                code_context = self._pack_codebase()
+                if not code_context:
+                    logger.warning("Failed to pack codebase, using empty context")
+                    code_context = ""
+
+                # Step 2: Analyze and generate tasks
+                analysis_result = self._run_feature_analysis(
+                    feature_request=f"Implement features from PRD: {prd_path}",
+                    prd_content=prd_content,
+                    code_context=code_context,
+                )
+
+                if not analysis_result.success:
+                    consecutive_failures += 1
+                    if consecutive_failures >= loop_config.max_consecutive_failures:
+                        logger.error("Max consecutive failures reached")
+                        break
+                    continue
+
+                # Extract tasks from analysis
+                tasks = self._extract_tasks_from_analysis(analysis_result)
+                if not tasks:
+                    logger.info("No more tasks to implement - feature complete!")
+                    break
+
+                consecutive_failures = 0  # Reset on successful analysis
+
+                # Step 3: Implement each task
+                for task_idx, task in enumerate(tasks):
+                    task_title = task.get("title", f"Task {task_idx + 1}")
+                    task_desc = task.get("description", "")
+                    logger.info(f"Implementing task: {task_title}")
+                    emit(EventType.TASK_START, {"task": task_title})
+
+                    iteration_detail = {
+                        "iteration": iterations_completed,
+                        "task": task_title,
+                        "tests_passed": False,
+                        "fixes_applied": 0,
+                        "success": False,
+                    }
+
+                    # Create workspace manager for Claude impl (uses existing interface)
+                    workspace = WorkspaceManager(self.config.repo_path)
+
+                    # Implement task with Claude
+                    impl_result = claude_impl.apply_task_to_repo(
+                        task_description=f"{task_title}\n\n{task_desc}",
+                        workspace=workspace,
+                        dry_run=loop_config.dry_run,
+                    )
+
+                    if impl_result.tokens_used:
+                        tokens_used += impl_result.tokens_used
+
+                    if not impl_result.success:
+                        logger.warning(f"Task implementation failed: {impl_result.error}")
+                        iteration_details.append(iteration_detail)
+                        continue
+
+                    # Commit changes if not dry-run
+                    if not loop_config.dry_run and loop_config.commit_per_task:
+                        commit_msg = f"[local-loop] {task_title}"
+                        commit_result = local_manager.commit_changes(commit_msg)
+                        if commit_result.success and commit_result.commit_hash:
+                            commits_made += 1
+                            logger.info(f"Committed: {commit_result.commit_hash}")
+
+                    # Step 4: Run tests
+                    test_result = local_manager.run_tests()
+                    if test_result.success:
+                        tests_passed += 1
+                        tasks_completed += 1
+                        iteration_detail["tests_passed"] = True
+                        iteration_detail["success"] = True
+                        logger.info(f"Tests passed for task: {task_title}")
+                        emit(EventType.TASK_COMPLETE, {"task": task_title, "success": True})
+                    else:
+                        # Step 5: Get Grok diagnosis and attempt fix
+                        logger.info("Tests failed, getting Grok diagnosis...")
+                        fix_count = 0
+                        max_fix_attempts = 3
+
+                        while not test_result.success and fix_count < max_fix_attempts:
+                            fix_count += 1
+                            try:
+                                # Get diagnosis from Grok
+                                diagnosis_prompt = self._build_grok_diagnosis_prompt(
+                                    task=task,
+                                    errors=test_result.error_summary,
+                                    code_context=code_context[:50000],  # Truncate
+                                )
+                                grok_response = grok_client.chat(
+                                    diagnosis_prompt,
+                                    system_prompt="You are a senior debugging engineer. Analyze test failures and provide structured JSON diagnosis.",
+                                )
+
+                                # Parse structured JSON response from Grok
+                                fix_prompt = grok_response  # Default to raw response
+                                diagnosis_data = extract_json_from_response(grok_response)
+                                if diagnosis_data and "fix_prompt" in diagnosis_data:
+                                    fix_prompt = diagnosis_data["fix_prompt"]
+                                    logger.info(f"Grok diagnosis: {diagnosis_data.get('diagnosis', {}).get('root_cause', 'unknown')}")
+                                    logger.info(f"Confidence: {diagnosis_data.get('confidence', 'unknown')}")
+
+                                # Apply fix with Claude
+                                fix_result = claude_impl.apply_fix_prompt(
+                                    fix_prompt=fix_prompt,
+                                    workspace=workspace,
+                                    dry_run=loop_config.dry_run,
+                                )
+
+                                if fix_result.tokens_used:
+                                    tokens_used += fix_result.tokens_used
+
+                                if fix_result.success and not loop_config.dry_run:
+                                    commit_msg = f"[local-loop] Fix: {task_title}"
+                                    commit_result = local_manager.commit_changes(commit_msg)
+                                    if commit_result.success and commit_result.commit_hash:
+                                        commits_made += 1
+
+                                # Re-run tests
+                                test_result = local_manager.run_tests()
+
+                            except GrokClientError as e:
+                                logger.error(f"Grok diagnosis failed: {e}")
+                                break
+
+                        iteration_detail["fixes_applied"] = fix_count
+                        fixes_applied += fix_count
+
+                        if test_result.success:
+                            tests_passed += 1
+                            tasks_completed += 1
+                            iteration_detail["tests_passed"] = True
+                            iteration_detail["success"] = True
+                            logger.info(f"Tests passed after {fix_count} fix(es)")
+                            emit(EventType.TASK_COMPLETE, {"task": task_title, "success": True})
+                        else:
+                            logger.warning(f"Tests still failing after {fix_count} attempts")
+                            emit(EventType.TASK_COMPLETE, {"task": task_title, "success": False})
+
+                    iteration_details.append(iteration_detail)
+
+                    # Human approval check
+                    if loop_config.human_approve and not loop_config.dry_run:
+                        try:
+                            response = input("\nContinue to next task? (Enter to continue, 'q' to quit): ")
+                            if response.lower() == 'q':
+                                logger.info("User requested exit")
+                                break
+                        except (EOFError, KeyboardInterrupt):
+                            logger.info("Input interrupted, continuing...")
+
+                # Check if feature is complete (no tasks in last iteration)
+                if not tasks:
+                    break
+
+        except KeyboardInterrupt:
+            logger.info("Loop interrupted by user")
+        except Exception as e:
+            logger.error(f"Unexpected error in local loop: {e}")
+            return LocalLoopResult(
+                success=False,
+                iterations_completed=iterations_completed,
+                max_iterations=max_iterations,
+                tasks_completed=tasks_completed,
+                tests_passed=tests_passed,
+                fixes_applied=fixes_applied,
+                tokens_used=tokens_used,
+                branch_name=branch_name,
+                commits_made=commits_made,
+                evaluator_used=evaluator_name,
+                error=str(e),
+                iteration_details=iteration_details,
+            )
+        finally:
+            local_manager.cleanup()
+
+        # Step 6: Final Grok evaluation
+        if tasks_completed > 0 and not self.config.mock_mode:
+            try:
+                # Build implementation summary from iteration details
+                impl_summary_lines = []
+                for detail in iteration_details:
+                    status = "✓" if detail.get("success") else "✗"
+                    impl_summary_lines.append(
+                        f"{status} Task: {detail.get('task_title', 'Unknown')} "
+                        f"(fixes: {detail.get('fixes_applied', 0)})"
+                    )
+                implementation_summary = "\n".join(impl_summary_lines) if impl_summary_lines else ""
+
+                eval_prompt = self._build_grok_evaluation_prompt(
+                    prd_content=prd_content,
+                    code_context=self._pack_codebase()[:50000],
+                    implementation_summary=implementation_summary,
+                )
+                eval_response = grok_client.chat(
+                    eval_prompt,
+                    system_prompt="You are a senior evaluator assessing PRD implementation completeness. Provide structured JSON assessment.",
+                )
+                final_evaluation = eval_response
+
+                # Try to parse as JSON for structured result
+                try:
+                    eval_data = extract_json_from_response(eval_response)
+                    if eval_data:
+                        # Handle new structured format with nested "evaluation"
+                        if "evaluation" in eval_data:
+                            prd_aligned = eval_data["evaluation"].get("prd_aligned", False)
+                            completion_pct = eval_data["evaluation"].get("completion_percentage", 0)
+                            logger.info(f"PRD completion: {completion_pct}%")
+                        # Fall back to flat format
+                        prd_aligned = prd_aligned or eval_data.get("approved", False)
+                        logger.info(f"PRD aligned: {prd_aligned}")
+                        if eval_data.get("remaining_tasks"):
+                            logger.info(f"Remaining tasks: {len(eval_data['remaining_tasks'])}")
+                except Exception:
+                    # If not JSON, just use the raw response
+                    prd_aligned = "approved" in eval_response.lower() or "complete" in eval_response.lower()
+
+            except GrokClientError as e:
+                logger.warning(f"Final Grok evaluation failed: {e}")
+
+        emit(EventType.SESSION_END, {
+            "success": tasks_completed > 0,
+            "tasks_completed": tasks_completed,
+            "evaluator": evaluator_name,
+        })
+
+        return LocalLoopResult(
+            success=tasks_completed > 0 and consecutive_failures < loop_config.max_consecutive_failures,
+            iterations_completed=iterations_completed,
+            max_iterations=max_iterations,
+            tasks_completed=tasks_completed,
+            tests_passed=tests_passed,
+            fixes_applied=fixes_applied,
+            tokens_used=tokens_used,
+            branch_name=branch_name,
+            commits_made=commits_made,
+            final_evaluation=final_evaluation,
+            prd_aligned=prd_aligned,
+            evaluator_used=evaluator_name,
+            iteration_details=iteration_details,
+        )
+
+    def _build_grok_diagnosis_prompt(
+        self,
+        task: dict,
+        errors: str,
+        code_context: str,
+    ) -> str:
+        """Build a prompt for Grok to diagnose test failures.
+
+        Uses the structured meta_error_fix prompt template for consistent
+        JSON output format.
+
+        Args:
+            task: The task that failed.
+            errors: Error output from tests.
+            code_context: Repository context (truncated).
+
+        Returns:
+            Prompt string for Grok with structured output expectations.
+        """
+        task_description = f"""Title: {task.get('title', 'Unknown')}
+Description: {task.get('description', '')}
+Priority: {task.get('priority', 'unknown')}
+Details: {task.get('details', '')}"""
+
+        return f"""You are a senior debugging engineer analyzing code that has failed tests during automated development.
+
+## Current Codebase
+{code_context}
+
+## Failing Task
+{task_description}
+
+## Test Errors
+{errors}
+
+**Instructions:**
+
+1. **Analyze the error context** provided:
+   - Identify which files/functions are causing the failure
+   - Understand the expected vs actual behavior
+   - Trace the error through the stack trace
+   - Check for common issues:
+     * Missing imports or dependencies
+     * Type mismatches
+     * Logic errors
+     * Edge cases not handled
+     * Missing or incorrect error handling
+
+2. **Generate a precise fix prompt** that:
+   - Clearly identifies the specific file(s) and function(s) to modify
+   - Describes exactly what change is needed
+   - Is actionable without requiring additional analysis
+
+**Expected Output:**
+
+Respond with a JSON object in this exact format:
+```json
+{{
+  "diagnosis": {{
+    "root_cause": "Brief description of the root cause",
+    "affected_files": ["list", "of", "files"],
+    "error_type": "type of error (syntax, logic, import, etc.)"
+  }},
+  "fix_prompt": "Detailed prompt for Claude to fix the issue. Be specific about what to change and where.",
+  "confidence": "high|medium|low",
+  "alternative_approaches": ["Optional alternative fixes if main approach fails"]
+}}
+```
+
+Focus on the minimal change needed to fix the error. Provide exact file paths and function names."""
+
+    def _build_grok_evaluation_prompt(
+        self,
+        prd_content: str,
+        code_context: str,
+        implementation_summary: str = "",
+    ) -> str:
+        """Build a prompt for Grok to evaluate PRD completion.
+
+        Uses the structured meta_prd_evaluation prompt template for consistent
+        JSON output format.
+
+        Args:
+            prd_content: The PRD requirements.
+            code_context: Current repository state.
+            implementation_summary: Optional summary of what was implemented.
+
+        Returns:
+            Prompt string for Grok with structured evaluation expectations.
+        """
+        return f"""You are evaluating a codebase after an autonomous development loop has attempted to implement features described in a PRD.
+
+## Product Requirements Document
+{prd_content}
+
+## Current Codebase
+{code_context}
+
+## Implementation History
+{implementation_summary if implementation_summary else "No implementation history available."}
+
+**Instructions:**
+
+1. **Compare the codebase to the PRD requirements:**
+   - Identify which requirements are fully implemented
+   - Identify which requirements are partially implemented
+   - Identify which requirements are missing entirely
+
+2. **Evaluate implementation quality:**
+   - Does the implementation match the PRD intent?
+   - Are there any edge cases not handled?
+   - Is the code production-ready or MVP-quality?
+   - Are there any obvious bugs or issues?
+
+3. **Check integration completeness:**
+   - Do all components work together correctly?
+   - Are there any broken connections between modules?
+   - Is error handling comprehensive?
+
+4. **Generate final assessment:**
+   - Overall completion percentage
+   - Remaining critical items
+   - Recommended next steps
+
+**Expected Output:**
+
+Respond with a JSON object in this exact format:
+```json
+{{
+  "evaluation": {{
+    "completion_percentage": 85,
+    "prd_aligned": true,
+    "production_ready": false,
+    "mvp_ready": true
+  }},
+  "requirements_status": [
+    {{
+      "requirement": "Requirement description",
+      "status": "complete|partial|missing",
+      "notes": "Any relevant notes"
+    }}
+  ],
+  "remaining_tasks": [
+    {{
+      "task": "Description of remaining task",
+      "priority": "critical|high|medium|low",
+      "estimated_complexity": "low|medium|high"
+    }}
+  ],
+  "overall_assessment": "Summary of the current state and recommendations",
+  "approved": true,
+  "approval_reason": "Reason for approval/rejection"
+}}
+```
+
+**Approval Criteria:**
+- approved=true if all critical requirements are implemented, tests pass, and no major bugs exist
+- approved=false if critical requirements are missing or major bugs prevent core functionality"""
 
     def _run_feature_analysis(
         self,

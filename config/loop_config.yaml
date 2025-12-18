@@ -1,6 +1,22 @@
 # Autonomous Loop Configuration for Meta-Agent
 # These settings control the autonomous development loop mode (--loop)
 
+# Evaluator settings for error diagnosis and PRD evaluation
+evaluator:
+  # Default evaluator: "grok" or "perplexity"
+  default: "grok"
+
+  # Grok API settings (xAI)
+  grok:
+    model: "grok-3-latest"
+    temperature: 0.3
+    max_tokens: 4096
+    timeout: 120
+
+  # Perplexity API settings (fallback)
+  perplexity:
+    model: "llama-3.1-sonar-large-128k-online"
+
 loop:
   # Master switch for loop mode (can be overridden by CLI --loop flag)
   enabled: false
