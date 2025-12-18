@@ -31,6 +31,7 @@ hiddenimports = [
     'metaagent.analysis',
     'metaagent.config',
     'metaagent.license',
+    'metaagent.gui',
     'metaagent.task_manager',
     'metaagent.local_manager',
     'metaagent.grok_client',
@@ -63,8 +64,8 @@ hiddenimports = [
 ]
 
 # Excluded modules to reduce size
+# Note: tkinter is NOT excluded because we use it for the GUI
 excludes = [
-    'tkinter',
     'matplotlib',
     'numpy',
     'pandas',

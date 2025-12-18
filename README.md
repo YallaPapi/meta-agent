@@ -38,6 +38,20 @@ That's it! Meta-agent will:
 
 ## Installation
 
+### Windows (Standalone Executable - Recommended)
+
+Download the latest `meta-agent.exe` from [Releases](https://github.com/yourrepo/meta-agent/releases) and run it directly - no Python required!
+
+```cmd
+# Run the GUI (easiest for beginners)
+meta-agent.exe --gui
+
+# Or use the CLI
+meta-agent.exe loop --prd docs/prd.md
+```
+
+### Windows/macOS/Linux (Python Package)
+
 ```bash
 # Clone the repository
 git clone <repo-url>
@@ -48,6 +62,18 @@ pip install -e ".[dev]"
 
 # Or with uv
 uv pip install -e ".[dev]"
+```
+
+### Build Standalone Executable
+
+```bash
+# Install PyInstaller
+pip install pyinstaller
+
+# Build the executable
+python scripts/build.py
+
+# Output: dist/meta-agent.exe (Windows) or dist/meta-agent (macOS/Linux)
 ```
 
 ## Configuration
@@ -145,6 +171,100 @@ Set via environment or CLI:
 export METAAGENT_PRO_KEY=your-key
 # or
 metaagent loop --prd docs/prd.md --pro-key your-key
+```
+
+## Graphical User Interface (GUI)
+
+For users who prefer not to use the terminal, meta-agent includes a simple GUI:
+
+```bash
+# Launch the GUI
+metaagent --gui
+```
+
+The GUI allows you to:
+- Browse or paste PRD content
+- Enter your pro key
+- Configure options (human approval, dry run, max iterations)
+- View real-time output log
+- Start/stop the loop
+
+## Example PRDs
+
+### Simple CLI Tool
+
+```markdown
+# Weather CLI PRD
+
+## Overview
+Build a command-line weather application that fetches weather data.
+
+## Features
+1. Accept city name as argument
+2. Display current temperature, humidity, and conditions
+3. Support both Celsius and Fahrenheit (--unit flag)
+4. Cache results for 10 minutes
+5. Handle errors gracefully (city not found, network issues)
+
+## Technical Requirements
+- Python 3.10+
+- Use httpx for API calls
+- Use typer for CLI
+- Store cache in ~/.weather-cache.json
+```
+
+### REST API
+
+```markdown
+# Todo API PRD
+
+## Overview
+Build a RESTful API for managing todo items.
+
+## Endpoints
+- GET /todos - List all todos
+- POST /todos - Create a todo
+- GET /todos/{id} - Get single todo
+- PUT /todos/{id} - Update a todo
+- DELETE /todos/{id} - Delete a todo
+
+## Todo Schema
+- id: int (auto-generated)
+- title: string (required)
+- description: string (optional)
+- completed: boolean (default: false)
+- created_at: datetime
+
+## Requirements
+- FastAPI framework
+- SQLite database with SQLAlchemy
+- Pydantic models for validation
+- Include tests with pytest
+```
+
+### Automation Script
+
+```markdown
+# File Organizer PRD
+
+## Overview
+Build a script that organizes files in a directory by type.
+
+## Features
+1. Scan specified directory for files
+2. Create subdirectories by file type:
+   - images/ (jpg, png, gif, svg)
+   - documents/ (pdf, doc, docx, txt)
+   - videos/ (mp4, avi, mov)
+   - code/ (py, js, ts, html, css)
+3. Move files to appropriate subdirectories
+4. Handle duplicates (rename with _1, _2, etc.)
+5. Generate summary report
+
+## CLI Interface
+- `organize /path/to/directory`
+- `--dry-run` flag to preview without moving
+- `--verbose` flag for detailed output
 ```
 
 ### Codebase Analysis Tools

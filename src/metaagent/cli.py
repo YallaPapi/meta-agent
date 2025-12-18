@@ -61,6 +61,19 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def gui_callback(value: bool) -> None:
+    """Launch GUI and exit."""
+    if value:
+        try:
+            from .gui import launch_gui
+            launch_gui()
+        except ImportError as e:
+            console.print(f"[red]Error:[/red] GUI requires tkinter: {e}")
+            console.print("[dim]On some systems, install with: apt install python3-tk[/dim]")
+            raise typer.Exit(1)
+        raise typer.Exit()
+
+
 def get_config_dir(config_dir: Optional[Path]) -> Path:
     """Resolve the config directory (where prompts/profiles live).
 
@@ -96,6 +109,13 @@ def main(
         callback=version_callback,
         is_eager=True,
         help="Show version and exit.",
+    ),
+    gui: bool = typer.Option(
+        None,
+        "--gui",
+        callback=gui_callback,
+        is_eager=True,
+        help="Launch graphical user interface.",
     ),
 ) -> None:
     """Meta-agent for automated codebase refinement."""
