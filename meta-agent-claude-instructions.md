@@ -152,3 +152,57 @@ METAAGENT_MAX_TOKENS=100000   # Max tokens per request
 
 ### Project Structure
 
+```
+meta-agent/
+├── src/metaagent/
+│   ├── cli.py           # CLI entrypoint
+│   ├── orchestrator.py  # Pipeline orchestration (smart mode, triage, local loop)
+│   ├── ollama_engine.py # Ollama integration for local triage
+│   ├── analysis.py      # Perplexity/LLM analysis engine
+│   ├── grok_client.py   # Grok API client for error diagnosis (NEW)
+│   ├── local_manager.py # GitPython-based repo manager (NEW)
+│   ├── repomix.py       # Codebase packing
+│   ├── plan_writer.py   # Plan file generation
+│   └── claude_runner.py # Claude Code integration
+├── config/
+│   ├── prompts.yaml     # Custom prompt templates
+│   ├── profiles.yaml    # Profile definitions (stages)
+│   ├── loop_config.yaml # Loop mode configuration
+│   └── prompt_library/  # Codebase-digest prompts
+└── docs/
+    └── prd.md           # Project PRD
+```
+
+### Output
+
+After running, meta-agent generates:
+- `docs/mvp_improvement_plan.md`: Human-readable improvement plan
+- Console output: Implementation report with prioritized tasks
+- The current Claude Code session receives structured tasks to implement
+
+### Workflow Integration
+
+1. **Write PRD**: Create `docs/prd.md` describing your feature/project
+2. **Run Meta-Agent**: `metaagent refine --smart --focus "feature"`
+3. **Review Plan**: Check generated `docs/mvp_improvement_plan.md`
+4. **Implement**: Work through tasks (or use `--auto-implement`)
+5. **Iterate**: Re-run to find remaining gaps
+
+### Available Profiles
+
+| Profile | Description |
+|---------|-------------|
+| `automation_agent` | For CLI tools and automation |
+| `backend_service` | APIs with security review |
+| `internal_tool` | Lighter analysis |
+| `quick_review` | PRD alignment only |
+| `full_review` | Comprehensive analysis |
+
+### Tips
+
+- **Use `--smart --focus` for new features**: Most effective mode
+- **Use `--loop` for complex features**: Automated iteration
+- **Use `--local-loop` for Grok-powered development**: Works directly in your repo
+- **Always have a PRD**: Meta-agent works best with clear requirements
+- **Check Ollama status**: Run `ollama list` to ensure models are available
+- **Start with `--mock` or `--dry-run`**: Test your workflow without API costs
